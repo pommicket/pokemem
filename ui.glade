@@ -1,0 +1,271 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Generated with glade 3.38.2 -->
+<interface>
+  <requires lib="gtk+" version="3.24"/>
+  <object class="GtkListStore" id="memory">
+    <columns>
+      <!-- column-name Index -->
+      <column type="gchararray"/>
+      <!-- column-name Address -->
+      <column type="gchararray"/>
+      <!-- column-name Value -->
+      <column type="gchararray"/>
+    </columns>
+  </object>
+  <object class="GtkWindow" id="window">
+    <property name="can-focus">False</property>
+    <property name="title" translatable="yes">pokemem</property>
+    <child>
+      <!-- n-columns=3 n-rows=1 -->
+      <object class="GtkGrid" id="main-grid">
+        <property name="visible">True</property>
+        <property name="can-focus">False</property>
+        <property name="column-spacing">8</property>
+        <child>
+          <object class="GtkBox" id="left-box">
+            <property name="visible">True</property>
+            <property name="can-focus">False</property>
+            <property name="orientation">vertical</property>
+            <child>
+              <object class="GtkEntry" id="address">
+                <property name="visible">True</property>
+                <property name="can-focus">True</property>
+                <property name="placeholder-text" translatable="yes">Address...</property>
+              </object>
+              <packing>
+                <property name="expand">False</property>
+                <property name="fill">True</property>
+                <property name="position">0</property>
+              </packing>
+            </child>
+            <child>
+              <object class="GtkBox">
+                <property name="visible">True</property>
+                <property name="can-focus">False</property>
+                <child>
+                  <object class="GtkEntry" id="memory-display-entries">
+                    <property name="visible">True</property>
+                    <property name="can-focus">True</property>
+                    <property name="max-length">6</property>
+                    <property name="text" translatable="yes">100</property>
+                    <property name="input-purpose">number</property>
+                    <signal name="activate" handler="update_configuration" swapped="no"/>
+                  </object>
+                  <packing>
+                    <property name="expand">False</property>
+                    <property name="fill">True</property>
+                    <property name="position">0</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkLabel">
+                    <property name="visible">True</property>
+                    <property name="can-focus">False</property>
+                    <property name="label" translatable="yes"> bytes</property>
+                  </object>
+                  <packing>
+                    <property name="expand">False</property>
+                    <property name="fill">True</property>
+                    <property name="position">1</property>
+                  </packing>
+                </child>
+              </object>
+              <packing>
+                <property name="expand">False</property>
+                <property name="fill">True</property>
+                <property name="position">1</property>
+              </packing>
+            </child>
+            <child>
+              <object class="GtkScrolledWindow">
+                <property name="visible">True</property>
+                <property name="can-focus">True</property>
+                <property name="shadow-type">in</property>
+                <property name="propagate-natural-width">True</property>
+                <child>
+                  <object class="GtkTreeView" id="memory-view">
+                    <property name="visible">True</property>
+                    <property name="can-focus">True</property>
+                    <property name="vexpand">True</property>
+                    <property name="vscroll-policy">natural</property>
+                    <property name="model">memory</property>
+                    <property name="search-column">0</property>
+                    <child internal-child="selection">
+                      <object class="GtkTreeSelection"/>
+                    </child>
+                    <child>
+                      <object class="GtkTreeViewColumn" id="header_index">
+                        <property name="resizable">True</property>
+                        <property name="title" translatable="yes">#</property>
+                        <child>
+                          <object class="GtkCellRendererText" id="col_index"/>
+                          <attributes>
+                            <attribute name="text">0</attribute>
+                          </attributes>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkTreeViewColumn" id="header_address">
+                        <property name="resizable">True</property>
+                        <property name="title" translatable="yes">Address</property>
+                        <property name="expand">True</property>
+                        <child>
+                          <object class="GtkCellRendererText" id="col_address">
+                            <property name="editable">True</property>
+                          </object>
+                          <attributes>
+                            <attribute name="text">1</attribute>
+                          </attributes>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkTreeViewColumn" id="header_value">
+                        <property name="resizable">True</property>
+                        <property name="title" translatable="yes">Value</property>
+                        <property name="expand">True</property>
+                        <child>
+                          <object class="GtkCellRendererText" id="col_value">
+                            <property name="editable">True</property>
+                          </object>
+                          <attributes>
+                            <attribute name="text">2</attribute>
+                          </attributes>
+                        </child>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+              </object>
+              <packing>
+                <property name="expand">True</property>
+                <property name="fill">True</property>
+                <property name="position">2</property>
+              </packing>
+            </child>
+          </object>
+          <packing>
+            <property name="left-attach">0</property>
+            <property name="top-attach">0</property>
+          </packing>
+        </child>
+        <child>
+          <object class="GtkBox" id="settings">
+            <property name="visible">True</property>
+            <property name="can-focus">False</property>
+            <property name="orientation">vertical</property>
+            <child>
+              <object class="GtkLabel" id="process-name">
+                <property name="visible">True</property>
+                <property name="can-focus">False</property>
+                <property name="label" translatable="yes">(No process selected)</property>
+                <attributes>
+                  <attribute name="weight" value="bold"/>
+                </attributes>
+              </object>
+              <packing>
+                <property name="expand">False</property>
+                <property name="fill">True</property>
+                <property name="position">0</property>
+              </packing>
+            </child>
+            <child>
+              <object class="GtkBox" id="pid-box">
+                <property name="visible">True</property>
+                <property name="can-focus">False</property>
+                <child>
+                  <object class="GtkLabel" id="pid-label">
+                    <property name="visible">True</property>
+                    <property name="can-focus">False</property>
+                    <property name="tooltip-text" translatable="yes">The Process ID (PID) is a unique number assigned to each process. You can find the PID of a process with a task manager.</property>
+                    <property name="label" translatable="yes">Process ID:</property>
+                  </object>
+                  <packing>
+                    <property name="expand">False</property>
+                    <property name="fill">True</property>
+                    <property name="position">0</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkEntry" id="pid">
+                    <property name="visible">True</property>
+                    <property name="can-focus">True</property>
+                    <property name="has-focus">True</property>
+                    <property name="input-purpose">number</property>
+                    <signal name="activate" handler="select_pid" swapped="no"/>
+                  </object>
+                  <packing>
+                    <property name="expand">False</property>
+                    <property name="fill">True</property>
+                    <property name="position">1</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkButton" id="go">
+                    <property name="label" translatable="yes">Go</property>
+                    <property name="visible">True</property>
+                    <property name="can-focus">True</property>
+                    <property name="receives-default">True</property>
+                    <signal name="clicked" handler="select_pid" swapped="no"/>
+                  </object>
+                  <packing>
+                    <property name="expand">False</property>
+                    <property name="fill">True</property>
+                    <property name="position">2</property>
+                  </packing>
+                </child>
+              </object>
+              <packing>
+                <property name="expand">False</property>
+                <property name="fill">True</property>
+                <property name="position">1</property>
+              </packing>
+            </child>
+            <child>
+              <placeholder/>
+            </child>
+          </object>
+          <packing>
+            <property name="left-attach">1</property>
+            <property name="top-attach">0</property>
+          </packing>
+        </child>
+        <child>
+          <object class="GtkBox" id="configuration">
+            <property name="visible">True</property>
+            <property name="can-focus">False</property>
+            <property name="orientation">vertical</property>
+            <child>
+              <object class="GtkCheckButton" id="stop-while-accessing-memory">
+                <property name="label" translatable="yes">Stop process while reading/writing memory</property>
+                <property name="visible">True</property>
+                <property name="can-focus">True</property>
+                <property name="receives-default">False</property>
+                <property name="tooltip-text" translatable="yes">Stop process while reading/writing memory</property>
+                <property name="active">True</property>
+                <property name="draw-indicator">True</property>
+                <signal name="toggled" handler="update_configuration" swapped="no"/>
+              </object>
+              <packing>
+                <property name="expand">False</property>
+                <property name="fill">True</property>
+                <property name="position">0</property>
+              </packing>
+            </child>
+            <child>
+              <placeholder/>
+            </child>
+            <child>
+              <placeholder/>
+            </child>
+          </object>
+          <packing>
+            <property name="left-attach">2</property>
+            <property name="top-attach">0</property>
+          </packing>
+        </child>
+      </object>
+    </child>
+  </object>
+</interface>
