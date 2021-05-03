@@ -31,6 +31,7 @@
                 <property name="visible">True</property>
                 <property name="can-focus">True</property>
                 <property name="placeholder-text" translatable="yes">Address...</property>
+                <signal name="activate" handler="update_configuration" swapped="no"/>
               </object>
               <packing>
                 <property name="expand">False</property>
@@ -238,7 +239,7 @@
             <property name="orientation">vertical</property>
             <child>
               <object class="GtkCheckButton" id="stop-while-accessing-memory">
-                <property name="label" translatable="yes">Stop process while reading/writing memory</property>
+                <property name="label" translatable="yes">Stop process while accessing memory</property>
                 <property name="visible">True</property>
                 <property name="can-focus">True</property>
                 <property name="receives-default">False</property>

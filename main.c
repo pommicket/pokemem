@@ -89,20 +89,20 @@ static void display_error_nofmt(State *state, char const *message) {
 } while (0)
 
 static void update_memory_view(State *state) {
-	if (!state->pid || !state->memory_view_address)
-		return;
-	Address ndisplay = state->memory_view_entries;
-	if (ndisplay == 0)
+	if (!state->pid)
 		return;
 	GtkBuilder *builder = state->builder;
+	GtkListStore *memory_list = GTK_LIST_STORE(gtk_builder_get_object(builder, "memory"));
+	Address ndisplay = state->memory_view_entries;
+	gtk_list_store_clear(memory_list);
+	if (ndisplay == 0)
+		return;
 	uint8_t *mem = calloc(1, ndisplay);
 	if (mem) {
-		GtkListStore *memory_list = GTK_LIST_STORE(gtk_builder_get_object(builder, "memory"));
 		int reader = memory_reader_open(state);
 		if (reader) {
 			GtkTreeIter iter;
 			ndisplay = memory_read_bytes(reader, state->memory_view_address, mem, ndisplay);
-			gtk_list_store_clear(memory_list);
 			for (Address i = 0; i < ndisplay; ++i) {
 				Address addr = state->memory_view_address + i;
 				uint8_t value = mem[i];
@@ -127,10 +127,21 @@ G_MODULE_EXPORT void update_configuration(GtkWidget *widget, gpointer user_data)
 		GTK_TOGGLE_BUTTON(gtk_builder_get_object(builder, "stop-while-accessing-memory")));
 	char const *n_entries_text = gtk_entry_get_text(
 		GTK_ENTRY(gtk_builder_get_object(builder, "memory-display-entries")));
-	char *endp;	
+	char *endp;
+	bool update_memview = false;
 	unsigned long n_entries = strtoul(n_entries_text, &endp, 10);
 	if (*n_entries_text && !*endp && n_entries != state->memory_view_entries) {
 		state->memory_view_entries = n_entries;
+		update_memview = true;
+	}
+	char const *address_text = gtk_entry_get_text(
+		GTK_ENTRY(gtk_builder_get_object(builder, "address")));
+	unsigned long address = strtoul(address_text, &endp, 16);
+	if (*address_text && !*endp && address != state->memory_view_address) {
+		state->memory_view_address = address;
+		update_memview = true;
+	}
+	if (update_memview) {
 		update_memory_view(state);
 	}
 }
