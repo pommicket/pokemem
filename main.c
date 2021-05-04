@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <inttypes.h>
 #include <unistd.h>
+#include <assert.h>
 
 typedef pid_t PID;
 typedef uint64_t Address;
@@ -22,6 +23,7 @@ typedef struct {
 	GtkWindow *window;
 	GtkBuilder *builder;
 	bool stop_while_accessing_memory;
+	long editing_memory; // index of memory value being edited, or -1 if none is
 	PID pid;
 	Map *maps;
 	Address memory_view_address;
@@ -29,28 +31,88 @@ typedef struct {
 	unsigned nmaps;
 } State;
 
+static void display_dialog_box_nofmt(State *state, GtkMessageType type, char const *message) {
+	GtkWidget *box = gtk_message_dialog_new(state->window,
+		GTK_DIALOG_MODAL|GTK_DIALOG_DESTROY_WITH_PARENT,
+		type, GTK_BUTTONS_OK, "%s", message);
+	// make sure dialog box is closed when OK is clicked.
+	g_signal_connect_swapped(box, "response", G_CALLBACK(gtk_widget_destroy), box);
+	gtk_widget_show_all(box);	
+}
 
-// get a file descriptor for reading memory from the process
-// returns 0 on failure
-static int memory_reader_open(State *state) {
+// this is a macro so we get -Wformat warnings
+#define display_dialog_box(state, type, fmt, ...) do { \
+	char _buf[1024]; \
+	snprintf(_buf, sizeof _buf, fmt, __VA_ARGS__); \
+	display_dialog_box_nofmt(state, type, _buf); \
+} while (0)
+#define display_error(state, fmt, ...) display_dialog_box(state, GTK_MESSAGE_ERROR, fmt, __VA_ARGS__)
+#define display_info(state, fmt, ...) display_dialog_box(state, GTK_MESSAGE_INFO, fmt, __VA_ARGS__)
+#define display_info_nofmt(state, message) display_dialog_box_nofmt(state, GTK_MESSAGE_INFO, message)
+
+
+
+static void close_process(State *state, char const *reason) {
+	GtkBuilder *builder = state->builder;
+	free(state->maps); state->maps = NULL;
+	state->nmaps = 0;
+	state->pid = 0;
+	{
+		GtkListStore *store = GTK_LIST_STORE(gtk_builder_get_object(builder, "memory"));
+		gtk_list_store_clear(store);
+	}
+	if (reason)
+		display_info(state, "Can't access process anymore: %s", reason);
+	else
+		display_info_nofmt(state, "Can't access process anymore.");
+}
+
+// don't use this function; use one of the ones below
+static int memory_open(State *state, int flags) {
 	if (state->pid) {
 		if (state->stop_while_accessing_memory) {
 			if (kill(state->pid, SIGSTOP) == -1) {
+				close_process(state, strerror(errno));
 				return 0;
 			}
 		}
 		char name[64];
 		sprintf(name, "/proc/%lld/mem", (long long)state->pid);
-		return open(name, O_RDONLY);
+		int fd = open(name, flags);
+		if (fd == -1) {
+			close_process(state, strerror(errno));
+			return 0;
+		}
+		return fd;
 	}
 	return 0;
 }
 
-static void memory_reader_close(State *state, int fd) {
+static void memory_close(State *state, int fd) {
 	if (state->stop_while_accessing_memory) {
 		kill(state->pid, SIGCONT);
 	}
 	if (fd) close(fd);
+}
+
+	
+// get a file descriptor for reading memory from the process
+// returns 0 on failure
+static int memory_reader_open(State *state) {
+	return memory_open(state, O_RDONLY);
+}
+
+static void memory_reader_close(State *state, int reader) {
+	memory_close(state, reader);
+}
+
+// like memory_reader_open, but for writing to memory
+static int memory_writer_open(State *state) {
+	return memory_open(state, O_WRONLY);
+}
+
+static void memory_writer_close(State *state, int writer) {
+	memory_close(state, writer);
 }
 
 static uint8_t memory_read_byte(int reader, Address addr) {
@@ -72,29 +134,25 @@ static Address memory_read_bytes(int reader, Address addr, uint8_t *memory, Addr
 	return idx;
 }
 
-static void display_error_nofmt(State *state, char const *message) {
-	GtkWidget *error_box = gtk_message_dialog_new(state->window,
-		GTK_DIALOG_MODAL|GTK_DIALOG_DESTROY_WITH_PARENT,
-		GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "%s", message);
-	// make sure dialog box is closed when OK is clicked.
-	g_signal_connect_swapped(error_box, "response", G_CALLBACK(gtk_widget_destroy), error_box);
-	gtk_widget_show_all(error_box);	
+// returns # of bytes written (so either 0 or 1)
+static Address memory_write_byte(int writer, Address addr, uint8_t byte) {
+	lseek(writer, (off_t)addr, SEEK_SET);
+	if (write(writer, &byte, 1) == 1)
+		return 1;
+	else
+		return 0;
 }
 
-// this is a macro so we get -Wformat warnings
-#define display_error(state, fmt, ...) do { \
-	char _buf[1024]; \
-	snprintf(_buf, sizeof _buf, fmt, __VA_ARGS__); \
-	display_error_nofmt(state, _buf); \
-} while (0)
-
-static void update_memory_view(State *state) {
+// pass config_potentially_changed = false if there definitely hasn't been an update to the target address
+// (this is used by auto-refresh so we don't have to clear and re-make the list store each time, which would screw up selection)
+static void update_memory_view(State *state, bool config_potentially_changed) {
 	if (!state->pid)
 		return;
 	GtkBuilder *builder = state->builder;
-	GtkListStore *memory_list = GTK_LIST_STORE(gtk_builder_get_object(builder, "memory"));
+	GtkListStore *store = GTK_LIST_STORE(gtk_builder_get_object(builder, "memory"));
 	Address ndisplay = state->memory_view_entries;
-	gtk_list_store_clear(memory_list);
+	if (config_potentially_changed)
+		gtk_list_store_clear(store);
 	if (ndisplay == 0)
 		return;
 	uint8_t *mem = calloc(1, ndisplay);
@@ -103,6 +161,7 @@ static void update_memory_view(State *state) {
 		if (reader) {
 			GtkTreeIter iter;
 			ndisplay = memory_read_bytes(reader, state->memory_view_address, mem, ndisplay);
+			gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(store), &iter, "0");
 			for (Address i = 0; i < ndisplay; ++i) {
 				Address addr = state->memory_view_address + i;
 				uint8_t value = mem[i];
@@ -110,7 +169,14 @@ static void update_memory_view(State *state) {
 				sprintf(index_str, "%" PRIdADDR, i);
 				sprintf(addr_str, "%" PRIxADDR, addr);
 				sprintf(value_str, "%u", value);
-				gtk_list_store_insert_with_values(memory_list, &iter, -1, 0, index_str, 1, addr_str, 2, value_str, -1);
+				if (config_potentially_changed) {
+					gtk_list_store_insert_with_values(store, &iter, -1, 0, index_str, 1, addr_str, 2, value_str, -1);
+				} else {
+					if (i != (Address)state->editing_memory)
+						gtk_list_store_set(store, &iter, 0, index_str, 1, addr_str, 2, value_str, -1);
+					if (!gtk_tree_model_iter_next(GTK_TREE_MODEL(store), &iter))
+						config_potentially_changed = true; // could happen if a map grows
+				}
 			}
 			memory_reader_close(state, reader);
 		}
@@ -142,7 +208,7 @@ G_MODULE_EXPORT void update_configuration(GtkWidget *widget, gpointer user_data)
 		update_memview = true;
 	}
 	if (update_memview) {
-		update_memory_view(state);
+		update_memory_view(state, true);
 	}
 }
 
@@ -217,10 +283,82 @@ G_MODULE_EXPORT void select_pid(GtkButton *button, gpointer user_data) {
 				// display whatever's in the first mapping
 				Map *first_map = &state->maps[0];
 				state->memory_view_address = first_map->lo;
-				update_memory_view(state);
+				update_memory_view(state, true);
 			}
 		}
 	}
+}
+
+G_MODULE_EXPORT void memory_edited(GtkCellRendererText *renderer, char *path, char *new_text, gpointer user_data) {
+	State *state = user_data;
+	GtkBuilder *builder = state->builder;
+	Address idx = (Address)atol(path);
+	Address addr = state->memory_view_address + idx;
+	char *endp;
+	long value = strtol(new_text, &endp, 10);
+	state->editing_memory = -1;
+	if (*new_text && *endp == '\0' && value >= 0 && value < 256) {
+		uint8_t byte = (uint8_t)value;
+		int writer = memory_writer_open(state);
+		if (writer) {
+			bool success = memory_write_byte(writer, addr, byte) == 1;
+			memory_writer_close(state, writer);
+			if (success) {
+				GtkListStore *store = GTK_LIST_STORE(gtk_builder_get_object(builder, "memory"));
+				GtkTreeIter iter;
+				char value_str[16];
+				sprintf(value_str, "%u", byte);
+				gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(store), &iter, path);
+				gtk_list_store_set(store, &iter, 2, value_str, -1);
+			}
+			
+		}
+	}
+}
+
+G_MODULE_EXPORT void memory_row_activated(GtkTreeView *tree_view, GtkTreePath *path, GtkTreeViewColumn *column, gpointer user_data) {
+	State *state = user_data;
+	GtkBuilder *builder = state->builder;
+	GtkToggleButton *auto_refresh = GTK_TOGGLE_BUTTON(gtk_builder_get_object(builder, "auto-refresh"));
+	gtk_toggle_button_set_active(auto_refresh, 0);
+}
+
+G_MODULE_EXPORT void refresh_memory(GtkWidget *widget, gpointer user_data) {
+	State *state = user_data;
+	update_memory_view(state, true);
+}
+
+G_MODULE_EXPORT void memory_editing_started(GtkCellRenderer *renderer, GtkCellEditable *editable, char *path, gpointer user_data) {
+	State *state = user_data;
+	state->editing_memory = atol(path);
+}
+
+G_MODULE_EXPORT void memory_editing_canceled(GtkCellRenderer *renderer, gpointer user_data) {
+	State *state = user_data;
+	state->editing_memory = -1;
+}
+
+// this function is run once per frame
+static gboolean frame_callback(gpointer user_data) {
+	State *state = user_data;
+	GtkBuilder *builder = state->builder;
+	GtkToggleButton *auto_refresh = GTK_TOGGLE_BUTTON(gtk_builder_get_object(builder, "auto-refresh"));
+#if 0
+	GtkWidget *memory_view = GTK_WIDGET(gtk_builder_get_object(builder, "memory-view"));
+	for (GtkWidget *focus_widget = gtk_window_get_focus(state->window);
+		focus_widget;
+		focus_widget = gtk_widget_get_parent(focus_widget)) {
+		if (focus_widget == memory_view) {
+			// do not allow auto-refresh while potentially editing memory
+			gtk_toggle_button_set_active(auto_refresh, 0);
+		}
+	}
+#endif
+	
+	if (gtk_toggle_button_get_active(auto_refresh)) {
+		update_memory_view(state, false);
+	}
+	return 1;
 }
 
 static void on_activate(GtkApplication *app, gpointer user_data) {
@@ -240,12 +378,15 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
 	gtk_window_set_application(window, app);
 	update_configuration(NULL, state);
 	
+	g_timeout_add(16, frame_callback, state);
+	
 	gtk_widget_show_all(GTK_WIDGET(window));
 }
 
 int main(int argc, char **argv) {
 	GtkApplication *app = gtk_application_new("com.pommicket.pokemem", G_APPLICATION_FLAGS_NONE);
 	State state = {0};
+	state.editing_memory = -1;
 	g_signal_connect(app, "activate", G_CALLBACK(on_activate), &state);
 	int status = g_application_run(G_APPLICATION(app), argc, argv);
 	g_object_unref(app);
