@@ -19,6 +19,53 @@ typedef struct {
 	Address lo, size;
 } Map;
 
+typedef enum {
+	TYPE_U8,
+	TYPE_S8,
+	TYPE_U16,
+	TYPE_S16,
+	TYPE_U32,
+	TYPE_S32,
+	TYPE_U64,
+	TYPE_S64,
+	TYPE_ASCII,
+	TYPE_F32,
+	TYPE_F64
+} DataType;
+
+static DataType data_type_from_name(char const *name) {
+	switch (name[0]) {
+	case 'u':
+		switch (atoi(&name[1])) {
+		case 8:  return TYPE_U8;
+		case 16: return TYPE_U16;
+		case 32: return TYPE_U32;
+		case 64: return TYPE_U64;
+		}
+		break;
+	case 's':
+		switch (atoi(&name[1])) {
+		case 8:  return TYPE_S8;
+		case 16: return TYPE_S16;
+		case 32: return TYPE_S32;
+		case 64: return TYPE_S64;
+		}
+		break;
+	case 'f':
+		switch (atoi(&name[1])) {
+		case 32: return TYPE_F32;
+		case 64: return TYPE_F64;
+		}
+		break;
+	case 'a':
+		if (strcmp(name, "ascii") == 0)
+			return TYPE_ASCII;
+		break;
+	}
+	assert(0);
+	return TYPE_U8;
+}
+
 typedef struct {
 	GtkWindow *window;
 	GtkBuilder *builder;
@@ -29,6 +76,7 @@ typedef struct {
 	Address memory_view_address;
 	Address memory_view_entries; // # of entries to show
 	unsigned nmaps;
+	DataType data_type;
 } State;
 
 static void display_dialog_box_nofmt(State *state, GtkMessageType type, char const *message) {
@@ -207,11 +255,27 @@ G_MODULE_EXPORT void update_configuration(GtkWidget *widget, gpointer user_data)
 		state->memory_view_address = address;
 		update_memview = true;
 	}
+	GtkRadioButton *data_type_u8 = GTK_RADIO_BUTTON(
+		gtk_builder_get_object(builder, "type-u8"));
+	for (GSList *l = gtk_radio_button_get_group(data_type_u8);
+		l; l = l->next) {
+		GtkToggleButton *button = l->data;
+		if (gtk_toggle_button_get_active(button)) {
+			char const *type_name = gtk_widget_get_name(GTK_WIDGET(button));
+			DataType type = data_type_from_name(type_name);
+			if (state->data_type != type) {
+				state->data_type = type;
+				update_memview = true;
+			}
+		}
+	}
+	
 	if (update_memview) {
 		update_memory_view(state, true);
 	}
 }
 
+// update the memory maps for the current process (state->maps)
 static void update_maps(State *state) {
 	free(state->maps); state->maps = NULL;
 	
@@ -289,6 +353,7 @@ G_MODULE_EXPORT void select_pid(GtkButton *button, gpointer user_data) {
 	}
 }
 
+// a value in memory was edited
 G_MODULE_EXPORT void memory_edited(GtkCellRendererText *renderer, char *path, char *new_text, gpointer user_data) {
 	State *state = user_data;
 	GtkBuilder *builder = state->builder;
@@ -343,17 +408,6 @@ static gboolean frame_callback(gpointer user_data) {
 	State *state = user_data;
 	GtkBuilder *builder = state->builder;
 	GtkToggleButton *auto_refresh = GTK_TOGGLE_BUTTON(gtk_builder_get_object(builder, "auto-refresh"));
-#if 0
-	GtkWidget *memory_view = GTK_WIDGET(gtk_builder_get_object(builder, "memory-view"));
-	for (GtkWidget *focus_widget = gtk_window_get_focus(state->window);
-		focus_widget;
-		focus_widget = gtk_widget_get_parent(focus_widget)) {
-		if (focus_widget == memory_view) {
-			// do not allow auto-refresh while potentially editing memory
-			gtk_toggle_button_set_active(auto_refresh, 0);
-		}
-	}
-#endif
 	
 	if (gtk_toggle_button_get_active(auto_refresh)) {
 		update_memory_view(state, false);
