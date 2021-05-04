@@ -136,7 +136,6 @@
                     <property name="vscroll-policy">natural</property>
                     <property name="model">memory</property>
                     <property name="search-column">0</property>
-                    <signal name="row-activated" handler="memory_row_activated" swapped="no"/>
                     <child internal-child="selection">
                       <object class="GtkTreeSelection"/>
                     </child>
@@ -443,6 +442,40 @@
               </packing>
             </child>
             <child>
+              <object class="GtkRadioButton" id="type-utf16">
+                <property name="label" translatable="yes">UTF-16 text</property>
+                <property name="name">utf16</property>
+                <property name="visible">True</property>
+                <property name="can-focus">True</property>
+                <property name="receives-default">False</property>
+                <property name="active">True</property>
+                <property name="draw-indicator">True</property>
+                <property name="group">type-u8</property>
+                <signal name="toggled" handler="update_configuration" swapped="no"/>
+              </object>
+              <packing>
+                <property name="expand">False</property>
+                <property name="fill">True</property>
+                <property name="position">12</property>
+              </packing>
+            </child>
+            <child>
+              <object class="GtkRadioButton" id="type-utf32">
+                <property name="label" translatable="yes">UTF-32 text</property>
+                <property name="name">utf32</property>
+                <property name="visible">True</property>
+                <property name="can-focus">True</property>
+                <property name="receives-default">False</property>
+                <property name="draw-indicator">True</property>
+                <property name="group">type-u8</property>
+              </object>
+              <packing>
+                <property name="expand">False</property>
+                <property name="fill">True</property>
+                <property name="position">13</property>
+              </packing>
+            </child>
+            <child>
               <object class="GtkRadioButton" id="type-f32">
                 <property name="label" translatable="yes">32-bit floating-point</property>
                 <property name="name">f32</property>
@@ -456,7 +489,7 @@
               <packing>
                 <property name="expand">False</property>
                 <property name="fill">True</property>
-                <property name="position">12</property>
+                <property name="position">14</property>
               </packing>
             </child>
             <child>
@@ -473,7 +506,7 @@
               <packing>
                 <property name="expand">False</property>
                 <property name="fill">True</property>
-                <property name="position">13</property>
+                <property name="position">15</property>
               </packing>
             </child>
           </object>
