@@ -1,341 +1,16 @@
-#include <gtk/gtk.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdbool.h>
-#include <inttypes.h>
-#include <unistd.h>
-#include <assert.h>
-#include <ctype.h>
-#include <wctype.h>
-
-typedef pid_t PID;
-typedef uint64_t Address;
-#define SCNxADDR SCNx64
-#define PRIdADDR PRId64
-#define PRIxADDR PRIx64
-
+#include "base.h"
 #include "unicode.h"
+#include "data.c"
+#include "memory.c"
 
-// a memory map
-typedef struct {
-	Address lo, size;
-} Map;
-
-typedef enum {
-	TYPE_U8,
-	TYPE_S8,
-	TYPE_U16,
-	TYPE_S16,
-	TYPE_U32,
-	TYPE_S32,
-	TYPE_U64,
-	TYPE_S64,
-	TYPE_ASCII,
-	TYPE_UTF16,
-	TYPE_UTF32,
-	TYPE_F32,
-	TYPE_F64
-} DataType;
-
-static DataType data_type_from_name(char const *name) {
-	switch (name[0]) {
-	case 'u':
-		switch (atoi(&name[1])) {
-		case 8:  return TYPE_U8;
-		case 16: return TYPE_U16;
-		case 32: return TYPE_U32;
-		case 64: return TYPE_U64;
-		}
-		if (strncmp(name, "utf", 3) == 0) {
-			switch (atoi(&name[3])) {
-			case 16: return TYPE_UTF16;
-			case 32: return TYPE_UTF32;
-			}
-		}
-		break;
-	case 's':
-		switch (atoi(&name[1])) {
-		case 8:  return TYPE_S8;
-		case 16: return TYPE_S16;
-		case 32: return TYPE_S32;
-		case 64: return TYPE_S64;
-		}
-		break;
-	case 'f':
-		switch (atoi(&name[1])) {
-		case 32: return TYPE_F32;
-		case 64: return TYPE_F64;
-		}
-		break;
-	case 'a':
-		if (strcmp(name, "ascii") == 0)
-			return TYPE_ASCII;
-		break;
+static SearchType search_type_from_str(char const *str) {
+	if (strcmp(str, "enter-value") == 0) {
+		return SEARCH_ENTER_VALUE;
+	} else if (strcmp(str, "same-different") == 0) {
+		return SEARCH_SAME_DIFFERENT;
 	}
 	assert(0);
-	return TYPE_U8;
-}
-
-static size_t data_type_size(DataType type) {
-	switch (type) {
-	case TYPE_U8:
-	case TYPE_S8:
-	case TYPE_ASCII:
-		return 1;
-	case TYPE_U16:
-	case TYPE_S16:
-	case TYPE_UTF16:
-		return 2;
-	case TYPE_U32:
-	case TYPE_S32:
-	case TYPE_F32:
-	case TYPE_UTF32:
-		return 4;
-	case TYPE_U64:
-	case TYPE_S64:
-	case TYPE_F64:
-		return 8;
-	}
-	return (size_t)-1;
-}
-
-// set str to "a" for 'a', "\\n" for '\n', "\\xff" for (wchar_t)255, etc.
-static void char_to_str(uint32_t c, char *str, size_t str_size) {
-	if (c <= WINT_MAX && iswgraph((wint_t)c)) {
-		snprintf(str, str_size, "%lc", (wint_t)c);
-	} else {
-		switch (c) {
-		case ' ': snprintf(str, str_size, "(space)"); break;
-		case '\n': snprintf(str, str_size, "\\n"); break;
-		case '\t': snprintf(str, str_size, "\\t"); break;
-		case '\r': snprintf(str, str_size, "\\r"); break;
-		case '\v': snprintf(str, str_size, "\\v"); break;
-		case '\0': snprintf(str, str_size, "\\0"); break;
-		default:
-			if (c < 256)
-				snprintf(str, str_size, "\\x%02x", (unsigned)c);
-			else
-				snprintf(str, str_size, "\\x%05lx", (unsigned long)c);
-		}
-	}
-}
-
-static bool char_from_str(char const *str, uint32_t *c) {
-	if (str[0] == '\0') return false;
-	if (str[0] == '\\') {
-		switch (str[1]) {
-		case 'n': *c = '\n'; return str[2] == '\0';
-		case 't': *c = '\t'; return str[2] == '\0';
-		case 'r': *c = '\r'; return str[2] == '\0';
-		case 'v': *c = '\v'; return str[2] == '\0';
-		case '0': *c = '\0'; return str[2] == '\0';
-		case 'x': {
-			unsigned long v = 0;
-			int w = 0;
-			if (sscanf(&str[2], "%lx%n", &v, &w) != 1 ||
-				(size_t)w != strlen(&str[2]) || v > UINT32_MAX)
-				return false;
-			*c = (uint32_t)v;
-			return true;
-		}
-		}
-	}
-	return unicode_utf8_to_utf32(c, str, strlen(str)) == strlen(str);
-}
-
-static void data_to_str(void const *value, DataType type, char *str, size_t str_size) {
-	switch (type) {
-	case TYPE_U8:  snprintf(str, str_size, "%" PRIu8,  *(uint8_t  *)value); break;
-	case TYPE_U16: snprintf(str, str_size, "%" PRIu16, *(uint16_t *)value); break;
-	case TYPE_U32: snprintf(str, str_size, "%" PRIu32, *(uint32_t *)value); break;
-	case TYPE_U64: snprintf(str, str_size, "%" PRIu64, *(uint64_t *)value); break;
-	case TYPE_S8:  snprintf(str, str_size, "%" PRId8,  *(int8_t  *)value);  break;
-	case TYPE_S16: snprintf(str, str_size, "%" PRId16, *(int16_t *)value);  break;
-	case TYPE_S32: snprintf(str, str_size, "%" PRId32, *(int32_t *)value);  break;
-	case TYPE_S64: snprintf(str, str_size, "%" PRId64, *(int64_t *)value);  break;
-	case TYPE_F32: snprintf(str, str_size, "%g", *(float  *)value);  break;
-	case TYPE_F64: snprintf(str, str_size, "%g", *(double *)value);  break;
-	case TYPE_UTF16: char_to_str(*(uint16_t *)value, str, str_size); break;
-	case TYPE_UTF32: char_to_str(*(uint32_t *)value, str, str_size); break;
-	case TYPE_ASCII:
-		char_to_str((uint8_t)*(char *)value, str, str_size);
-		break;
-	
-	}
-}
-
-// returns true on success, false if str is not a well-formatted value
-static bool data_from_str(char const *str, DataType type, void *value) {
-	int len = (int)strlen(str);
-	int w = 0;
-	uint32_t c = 0;
-	switch (type) {
-	case TYPE_U8:  return sscanf(str, "%" SCNu8  "%n", (uint8_t  *)value, &w) == 1 && w == len;
-	case TYPE_S8:  return sscanf(str, "%" SCNd8  "%n", ( int8_t  *)value, &w) == 1 && w == len;
-	case TYPE_U16: return sscanf(str, "%" SCNu16 "%n", (uint16_t *)value, &w) == 1 && w == len;
-	case TYPE_S16: return sscanf(str, "%" SCNd16 "%n", ( int16_t *)value, &w) == 1 && w == len;
-	case TYPE_U32: return sscanf(str, "%" SCNu32 "%n", (uint32_t *)value, &w) == 1 && w == len;
-	case TYPE_S32: return sscanf(str, "%" SCNd32 "%n", ( int32_t *)value, &w) == 1 && w == len;
-	case TYPE_U64: return sscanf(str, "%" SCNu64 "%n", (uint64_t *)value, &w) == 1 && w == len;
-	case TYPE_S64: return sscanf(str, "%" SCNd64 "%n", ( int64_t *)value, &w) == 1 && w == len;
-	case TYPE_F32: return sscanf(str, "%f%n",  (float *)value,  &w) == 1 && w == len;
-	case TYPE_F64: return sscanf(str, "%lf%n", (double *)value, &w) == 1 && w == len;
-	case TYPE_ASCII:
-		if (!char_from_str(str, &c)) return false;
-		if (c > 127) return false;
-		*(uint8_t *)value = (uint8_t)c;
-		return true;
-	case TYPE_UTF16:
-		if (!char_from_str(str, &c)) return false;
-		if (c > 65535) return false;
-		*(uint16_t *)value = (uint16_t)c;
-		return true;
-	case TYPE_UTF32:
-		if (!char_from_str(str, &c)) return false;
-		*(uint32_t *)value = c;
-		return true;
-	}
-	assert(0);
-	return false;
-}
-
-typedef struct {
-	GtkWindow *window;
-	GtkBuilder *builder;
-	bool stop_while_accessing_memory;
-	long editing_memory; // index of memory value being edited, or -1 if none is
-	PID pid;
-	Map *maps;
-	Address memory_view_address;
-	uint32_t memory_view_entries; // # of entries to show
-	unsigned nmaps;
-	DataType data_type;
-} State;
-
-static void display_dialog_box_nofmt(State *state, GtkMessageType type, char const *message) {
-	GtkWidget *box = gtk_message_dialog_new(state->window,
-		GTK_DIALOG_MODAL|GTK_DIALOG_DESTROY_WITH_PARENT,
-		type, GTK_BUTTONS_OK, "%s", message);
-	// make sure dialog box is closed when OK is clicked.
-	g_signal_connect_swapped(box, "response", G_CALLBACK(gtk_widget_destroy), box);
-	gtk_widget_show_all(box);	
-}
-
-// this is a macro so we get -Wformat warnings
-#define display_dialog_box(state, type, fmt, ...) do { \
-	char _buf[1024]; \
-	snprintf(_buf, sizeof _buf, fmt, __VA_ARGS__); \
-	display_dialog_box_nofmt(state, type, _buf); \
-} while (0)
-#define display_error(state, fmt, ...) display_dialog_box(state, GTK_MESSAGE_ERROR, fmt, __VA_ARGS__)
-#define display_info(state, fmt, ...) display_dialog_box(state, GTK_MESSAGE_INFO, fmt, __VA_ARGS__)
-#define display_info_nofmt(state, message) display_dialog_box_nofmt(state, GTK_MESSAGE_INFO, message)
-
-
-
-static void close_process(State *state, char const *reason) {
-	GtkBuilder *builder = state->builder;
-	free(state->maps); state->maps = NULL;
-	state->nmaps = 0;
-	state->pid = 0;
-	{
-		GtkListStore *store = GTK_LIST_STORE(gtk_builder_get_object(builder, "memory"));
-		gtk_list_store_clear(store);
-	}
-	if (reason)
-		display_info(state, "Can't access process anymore: %s", reason);
-	else
-		display_info_nofmt(state, "Can't access process anymore.");
-}
-
-// don't use this function; use one of the ones below
-static int memory_open(State *state, int flags) {
-	if (state->pid) {
-		if (state->stop_while_accessing_memory) {
-			if (kill(state->pid, SIGSTOP) == -1) {
-				close_process(state, strerror(errno));
-				return 0;
-			}
-		}
-		char name[64];
-		sprintf(name, "/proc/%lld/mem", (long long)state->pid);
-		int fd = open(name, flags);
-		if (fd == -1) {
-			close_process(state, strerror(errno));
-			return 0;
-		}
-		return fd;
-	}
-	return 0;
-}
-
-static void memory_close(State *state, int fd) {
-	if (state->stop_while_accessing_memory) {
-		kill(state->pid, SIGCONT);
-	}
-	if (fd) close(fd);
-}
-
-	
-// get a file descriptor for reading memory from the process
-// returns 0 on failure
-static int memory_reader_open(State *state) {
-	return memory_open(state, O_RDONLY);
-}
-
-static void memory_reader_close(State *state, int reader) {
-	memory_close(state, reader);
-}
-
-// like memory_reader_open, but for writing to memory
-static int memory_writer_open(State *state) {
-	return memory_open(state, O_WRONLY);
-}
-
-static void memory_writer_close(State *state, int writer) {
-	memory_close(state, writer);
-}
-
-static uint8_t memory_read_byte(int reader, Address addr) {
-	lseek(reader, (off_t)addr, SEEK_SET);
-	uint8_t byte = 0;
-	read(reader, &byte, 1);
-	return byte;
-}
-
-// returns number of bytes successfully read
-static Address memory_read_bytes(int reader, Address addr, uint8_t *memory, Address nbytes) {
-	lseek(reader, (off_t)addr, SEEK_SET);
-	Address idx = 0;
-	while (idx < nbytes) {
-		ssize_t n = read(reader, &memory[idx], (size_t)(nbytes - idx));
-		if (n <= 0) break;
-		idx += (Address)n;
-	}
-	return idx;
-}
-
-// returns # of bytes written (so either 0 or 1)
-static Address memory_write_byte(int writer, Address addr, uint8_t byte) {
-	lseek(writer, (off_t)addr, SEEK_SET);
-	if (write(writer, &byte, 1) == 1)
-		return 1;
-	else
-		return 0;
-}
-
-// returns # of bytes written
-static Address memory_write_bytes(int writer, Address addr, uint8_t const *bytes, Address nbytes) {
-	lseek(writer, (off_t)addr, SEEK_SET);
-	Address idx = 0;
-	while (idx < nbytes) {
-		ssize_t n = write(writer, &bytes[idx], (size_t)(nbytes - idx));
-		if (n < 0) break;
-		idx += (Address)n;
-	}
-	return idx;
+	return 0xff;
 }
 
 // pass config_potentially_changed = false if there definitely hasn't been an update to the target address
@@ -383,7 +58,34 @@ static void update_memory_view(State *state, bool config_potentially_changed) {
 	}
 }
 
-G_MODULE_EXPORT void update_configuration(GtkWidget *widget, gpointer user_data) {
+static void bytes_to_text(uint64_t nbytes, char *out, size_t out_size) {
+	if (nbytes == 0)
+		snprintf(out, out_size, "0");
+	else if (nbytes < (1ul<<10))
+		snprintf(out, out_size, "%uB", (unsigned)nbytes);
+	else if (nbytes < (1ul<<20))
+		snprintf(out, out_size, "%.1fKB", (double)nbytes / (double)(1ul<<10));
+	else if (nbytes < (1ul<<30))
+		snprintf(out, out_size, "%.1fMB", (double)nbytes / (double)(1ul<<20));
+	else
+		snprintf(out, out_size, "%.1fGB", (double)nbytes / (double)(1ul<<30));
+}
+
+// returns the name of the selected GtkRadioButton in the group whose leader's name is group_name
+// (or NULL if none is, which shouldn't usually happen)
+static char const *radio_group_get_selected(State *state, char const *group_name) {
+	GtkRadioButton *leader = GTK_RADIO_BUTTON(gtk_builder_get_object(state->builder, group_name));
+	for (GSList *l = gtk_radio_button_get_group(leader);
+		l; l = l->next) {
+		GtkToggleButton *button = l->data;
+		if (gtk_toggle_button_get_active(button)) {
+			return gtk_widget_get_name(GTK_WIDGET(button));
+		}
+	}
+	return NULL;
+}
+
+G_MODULE_EXPORT void update_configuration(GtkWidget *_widget, gpointer user_data) {
 	State *state = user_data;
 	GtkBuilder *builder = state->builder;
 	state->stop_while_accessing_memory = gtk_toggle_button_get_active(
@@ -404,19 +106,48 @@ G_MODULE_EXPORT void update_configuration(GtkWidget *widget, gpointer user_data)
 		state->memory_view_address = address;
 		update_memview = true;
 	}
-	GtkRadioButton *data_type_u8 = GTK_RADIO_BUTTON(
-		gtk_builder_get_object(builder, "type-u8"));
-	for (GSList *l = gtk_radio_button_get_group(data_type_u8);
-		l; l = l->next) {
-		GtkToggleButton *button = l->data;
-		if (gtk_toggle_button_get_active(button)) {
-			char const *type_name = gtk_widget_get_name(GTK_WIDGET(button));
-			DataType type = data_type_from_name(type_name);
-			if (state->data_type != type) {
-				state->data_type = type;
-				update_memview = true;
-			}
+	char const *data_type_str = radio_group_get_selected(state, "type-u8");
+	DataType data_type = data_type_from_name(data_type_str);
+	if (state->data_type != data_type) {
+		state->data_type = data_type;
+		update_memview = true;
+	}
+	
+	// update memory/disk estimates for search
+	GtkLabel *memory_label = GTK_LABEL(gtk_builder_get_object(builder, "required-memory"));
+	GtkLabel *disk_label   = GTK_LABEL(gtk_builder_get_object(builder, "required-disk"));
+	char const *search_type_str = radio_group_get_selected(state, "enter-value");
+	SearchType search_type = search_type_from_str(search_type_str);
+	state->search_type = search_type;
+	if (state->pid) {
+		size_t item_size = data_type_size(data_type);
+		Address total_memory = state->total_memory;
+		Address total_items = total_memory / item_size;
+		Address memory_usage = total_items / 8; // 1 bit per item
+		{
+			char text[32];
+			bytes_to_text(memory_usage, text, sizeof text);
+			gtk_label_set_text(memory_label, text);
 		}
+		Address disk_usage = 0;
+		switch (search_type) {
+		case SEARCH_ENTER_VALUE:
+			// no disk space needed
+			break;
+		case SEARCH_SAME_DIFFERENT:
+			// we need to store all of memory on disk for this kind of search
+			disk_usage = total_memory;
+			break;
+		}
+		
+		{
+			char text[32];
+			bytes_to_text(disk_usage, text, sizeof text);
+			gtk_label_set_text(disk_label, text);
+		}
+	} else {
+		gtk_label_set_text(memory_label, "N/A");
+		gtk_label_set_text(disk_label,   "N/A");
 	}
 	
 	if (update_memview) {
@@ -439,6 +170,7 @@ static void update_maps(State *state) {
 		rewind(maps_file);
 		Map *maps = state->maps = calloc(capacity, sizeof *maps);
 		unsigned nmaps = 0;
+		state->total_memory = 0;
 		if (maps) {
 			while (fgets(line, sizeof line, maps_file)) {
 				Address addr_lo, addr_hi;
@@ -448,6 +180,7 @@ static void update_maps(State *state) {
 						Map *map = &maps[nmaps++];
 						map->lo = addr_lo;
 						map->size = addr_hi - addr_lo;
+						state->total_memory += map->size;
 					}
 				}
 			}
@@ -461,7 +194,7 @@ static void update_maps(State *state) {
 }
 
 // the user entered a PID.
-G_MODULE_EXPORT void select_pid(GtkButton *button, gpointer user_data) {
+G_MODULE_EXPORT void select_pid(GtkButton *_button, gpointer user_data) {
 	State *state = user_data;
 	GtkBuilder *builder = state->builder;
 	GtkEntry *pid = GTK_ENTRY(gtk_builder_get_object(builder, "pid"));
@@ -491,6 +224,7 @@ G_MODULE_EXPORT void select_pid(GtkButton *button, gpointer user_data) {
 			state->pid = (PID)pid_number;
 			close(dir);
 			update_maps(state);
+			update_configuration(NULL, state); // we need to do this to update the search resource usage estimates
 			if (state->nmaps) {
 				// display whatever's in the first mapping
 				Map *first_map = &state->maps[0];
@@ -502,7 +236,7 @@ G_MODULE_EXPORT void select_pid(GtkButton *button, gpointer user_data) {
 }
 
 // a value in memory was edited
-G_MODULE_EXPORT void memory_edited(GtkCellRendererText *renderer, char *path, char *new_text, gpointer user_data) {
+G_MODULE_EXPORT void memory_edited(GtkCellRendererText *_renderer, char *path, char *new_text, gpointer user_data) {
 	State *state = user_data;
 	GtkBuilder *builder = state->builder;
 	DataType data_type = state->data_type;
@@ -514,12 +248,14 @@ G_MODULE_EXPORT void memory_edited(GtkCellRendererText *renderer, char *path, ch
 	if (data_from_str(new_text, data_type, &value)) {
 		int writer = memory_writer_open(state);
 		if (writer) {
+			// write the value
 			bool success = memory_write_bytes(writer, addr, (uint8_t const *)&value, item_size) == item_size;
 			memory_writer_close(state, writer);
 			if (success) {
 				GtkListStore *store = GTK_LIST_STORE(gtk_builder_get_object(builder, "memory"));
 				GtkTreeIter iter;
 				char value_str[32];
+				// convert back to a string (so new_text = "0.10" becomes value_str = "0.1", etc.)
 				data_to_str(&value, data_type, value_str, sizeof value_str);
 				gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(store), &iter, path);
 				gtk_list_store_set(store, &iter, 2, value_str, -1);
@@ -529,19 +265,35 @@ G_MODULE_EXPORT void memory_edited(GtkCellRendererText *renderer, char *path, ch
 	}
 }
 
-G_MODULE_EXPORT void refresh_memory(GtkWidget *widget, gpointer user_data) {
+G_MODULE_EXPORT void refresh_memory(GtkWidget *_widget, gpointer user_data) {
 	State *state = user_data;
 	update_memory_view(state, true);
 }
 
-G_MODULE_EXPORT void memory_editing_started(GtkCellRenderer *renderer, GtkCellEditable *editable, char *path, gpointer user_data) {
+G_MODULE_EXPORT void memory_editing_started(GtkCellRenderer *_renderer, GtkCellEditable *editable, char *path, gpointer user_data) {
 	State *state = user_data;
 	state->editing_memory = atol(path);
 }
 
-G_MODULE_EXPORT void memory_editing_canceled(GtkCellRenderer *renderer, gpointer user_data) {
+G_MODULE_EXPORT void memory_editing_canceled(GtkCellRenderer *_renderer, gpointer user_data) {
 	State *state = user_data;
 	state->editing_memory = -1;
+}
+
+G_MODULE_EXPORT void search_start(GtkWidget *_widget, gpointer user_data) {
+	State *state = user_data;
+	GtkBuilder *builder = state->builder;
+	SearchType search_type = state->search_type;
+	gtk_widget_hide(GTK_WIDGET(gtk_builder_get_object(builder, "pre-search")));
+	gtk_widget_show(GTK_WIDGET(gtk_builder_get_object(builder, "search-common")));
+	switch (search_type) {
+	case SEARCH_ENTER_VALUE:
+		gtk_widget_show(GTK_WIDGET(gtk_builder_get_object(builder, "search-enter-value")));
+		break;
+	case SEARCH_SAME_DIFFERENT:
+		gtk_widget_show(GTK_WIDGET(gtk_builder_get_object(builder, "search-same-different")));
+		break;
+	}
 }
 
 // this function is run once per frame

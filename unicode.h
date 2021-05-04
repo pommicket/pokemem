@@ -1,3 +1,4 @@
+// Functions for handling unicode text.
 #ifndef UNICODE_H_
 #define UNICODE_H_
 #define UNICODE_BOX_CHARACTER 0x2610
