@@ -161,3 +161,7 @@ static bool data_from_str(char const *str, DataType type, void *value) {
 	assert(0);
 	return false;
 }
+
+static bool data_equal(DataType type, void const *a, void const *b) {
+	return memcmp(a, b, data_type_size(type)) == 0;
+}

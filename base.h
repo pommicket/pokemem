@@ -57,6 +57,7 @@ typedef struct {
 	unsigned nmaps;
 	DataType data_type;
 	SearchType search_type;
+	uint64_t *search_candidates; // this is a bit array, where the ith bit corresponds to whether byte #i in the processes memory is a search candidate.
 } State;
 
 static void display_dialog_box_nofmt(State *state, GtkMessageType type, char const *message) {
@@ -75,6 +76,7 @@ static void display_dialog_box_nofmt(State *state, GtkMessageType type, char con
 	display_dialog_box_nofmt(state, type, _buf); \
 } while (0)
 #define display_error(state, fmt, ...) display_dialog_box(state, GTK_MESSAGE_ERROR, fmt, __VA_ARGS__)
+#define display_error_nofmt(state, message) display_dialog_box_nofmt(state, GTK_MESSAGE_ERROR, message)
 #define display_info(state, fmt, ...) display_dialog_box(state, GTK_MESSAGE_INFO, fmt, __VA_ARGS__)
 #define display_info_nofmt(state, message) display_dialog_box_nofmt(state, GTK_MESSAGE_INFO, message)
 

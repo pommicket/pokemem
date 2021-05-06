@@ -156,7 +156,8 @@ G_MODULE_EXPORT void update_configuration(GtkWidget *_widget, gpointer user_data
 }
 
 // update the memory maps for the current process (state->maps)
-static void update_maps(State *state) {
+// returns true on success
+static bool update_maps(State *state) {
 	free(state->maps); state->maps = NULL;
 	
 	char maps_name[64];
@@ -185,12 +186,14 @@ static void update_maps(State *state) {
 				}
 			}
 			state->nmaps = nmaps;
+			return true;
 		} else {
 			display_error(state, "Not enough memory to hold map metadata (%zu items)", capacity);
 		}
 	} else {
 		display_error(state, "Couldn't open %s: %s", maps_name, strerror(errno));
 	}
+	return false;
 }
 
 // the user entered a PID.
@@ -223,13 +226,16 @@ G_MODULE_EXPORT void select_pid(GtkButton *_button, gpointer user_data) {
 			gtk_label_set_text(process_name_label, process_name);
 			state->pid = (PID)pid_number;
 			close(dir);
-			update_maps(state);
-			update_configuration(NULL, state); // we need to do this to update the search resource usage estimates
-			if (state->nmaps) {
-				// display whatever's in the first mapping
-				Map *first_map = &state->maps[0];
-				state->memory_view_address = first_map->lo;
-				update_memory_view(state, true);
+			if (update_maps(state)) {
+				update_configuration(NULL, state); // we need to do this to update the search resource usage estimates
+				if (state->nmaps) {
+					// display whatever's in the first mapping
+					Map *first_map = &state->maps[0];
+					state->memory_view_address = first_map->lo;
+					update_memory_view(state, true);
+				}
+				// only allow searching once a process has been selected
+				gtk_widget_show(GTK_WIDGET(gtk_builder_get_object(builder, "search-box")));
 			}
 		}
 	}
@@ -280,20 +286,155 @@ G_MODULE_EXPORT void memory_editing_canceled(GtkCellRenderer *_renderer, gpointe
 	state->editing_memory = -1;
 }
 
+static void update_candidates(State *state) {
+	GtkBuilder *builder = state->builder;
+	uint64_t *candidates = state->search_candidates;
+	size_t item_size = data_type_size(state->data_type);
+	Address entries = state->total_memory / (64 * item_size);
+	Address ncandidates = 0;
+	for (Address i = 0; i < entries; ++i) {
+		ncandidates += (unsigned)__builtin_popcountll(candidates[i]);
+	}
+	{
+		GtkLabel *ncandidates_label = GTK_LABEL(gtk_builder_get_object(builder, "candidates-left"));
+		char text[32];
+		sprintf(text, "%llu", (unsigned long long)ncandidates);
+		gtk_label_set_text(ncandidates_label, text);
+	}
+}
+
 G_MODULE_EXPORT void search_start(GtkWidget *_widget, gpointer user_data) {
 	State *state = user_data;
-	GtkBuilder *builder = state->builder;
-	SearchType search_type = state->search_type;
-	gtk_widget_hide(GTK_WIDGET(gtk_builder_get_object(builder, "pre-search")));
-	gtk_widget_show(GTK_WIDGET(gtk_builder_get_object(builder, "search-common")));
-	switch (search_type) {
-	case SEARCH_ENTER_VALUE:
-		gtk_widget_show(GTK_WIDGET(gtk_builder_get_object(builder, "search-enter-value")));
-		break;
-	case SEARCH_SAME_DIFFERENT:
-		gtk_widget_show(GTK_WIDGET(gtk_builder_get_object(builder, "search-same-different")));
-		break;
+	if (update_maps(state)) {
+		GtkBuilder *builder = state->builder;
+		SearchType search_type = state->search_type;
+		DataType data_type = state->data_type;
+		size_t item_size = data_type_size(data_type);
+		gtk_widget_hide(GTK_WIDGET(gtk_builder_get_object(builder, "pre-search")));
+		gtk_widget_hide(GTK_WIDGET(gtk_builder_get_object(builder, "data-type-box")));
+		gtk_widget_show(GTK_WIDGET(gtk_builder_get_object(builder, "search-common")));
+		gtk_label_set_text(GTK_LABEL(gtk_builder_get_object(builder, "steps-completed")), "0");
+		// state->total_memory should always be a multiple of the page size, which is definitely a multiple of 64 * 8 = 512.
+		assert(state->total_memory % 512 == 0);
+		uint64_t *candidates = state->search_candidates = malloc(state->total_memory / (8 * item_size));
+		if (candidates) {
+			memset(candidates, 0xff, state->total_memory / (8 * item_size));
+			switch (search_type) {
+			case SEARCH_ENTER_VALUE:
+				gtk_widget_show(GTK_WIDGET(gtk_builder_get_object(builder, "search-enter-value")));
+				break;
+			case SEARCH_SAME_DIFFERENT:
+				gtk_widget_show(GTK_WIDGET(gtk_builder_get_object(builder, "search-same-different")));
+				break;
+			}
+			update_candidates(state);
+		} else {
+			display_error_nofmt(state, "Not enough memory available for search.");
+		}
 	}
+	
+}
+
+G_MODULE_EXPORT void search_update(GtkWidget *_widget, gpointer user_data) {
+	State *state = user_data;
+	GtkBuilder *builder = state->builder;
+	DataType data_type = state->data_type;
+	size_t item_size = data_type_size(data_type);
+	SearchType search_type = state->search_type;
+	uint64_t *candidates = state->search_candidates;
+	int memory_reader = memory_reader_open(state);
+	if (memory_reader) {
+		switch (search_type) {
+		case SEARCH_ENTER_VALUE: {
+			uint64_t value;
+			GtkEntry *value_entry = GTK_ENTRY(gtk_builder_get_object(builder, "current-value"));
+			if (data_from_str(gtk_entry_get_text(value_entry), data_type, &value)) {
+				Address bitset_index = 0;
+				for (unsigned m = 0; m < state->nmaps; ++m) {
+					// there is some kinda complicated code here to skip over large regions of
+					// eliminated addresses. specifically, we can skip 64 bytes at a time, because
+					// of our bitset.
+					Map const *map = &state->maps[m];
+					Address addr_lo = map->lo;
+					Address n_items = map->size / item_size;
+					Address start = 0;
+					while (start < n_items) {
+						while (start < n_items) {
+							if (candidates[bitset_index/64])
+								break;
+							start += 64;
+							bitset_index += 64;
+						}
+						Address end = start, bitset_index_end = bitset_index;
+						
+						while (end < n_items) {
+							if (candidates[bitset_index_end/64] == 0)
+								break;
+							end += 64;
+							bitset_index_end += 64;
+						}
+						
+						// we have a "run" of possible candidates from `start` to `end`.
+						Address run_size = end - start;
+						Address bytes_left = run_size * item_size;
+						// this "run" could be pretty long, so let's do it in chunks.
+						uint64_t chunk[512]; // (make sure this is as aligned as possible)
+						while (bytes_left > 0) {
+							size_t this_chunk_bytes = sizeof chunk;
+							if (this_chunk_bytes > bytes_left)
+								this_chunk_bytes = bytes_left;
+							
+							Address base_addr = addr_lo + run_size * item_size - bytes_left;
+							this_chunk_bytes = memory_read_bytes(memory_reader, base_addr, (uint8_t *)chunk, this_chunk_bytes);
+							if (this_chunk_bytes == 0) {
+								break; // uh oh....
+							}
+							
+							size_t this_chunk_items = this_chunk_bytes / item_size;
+							for (size_t i = 0; i < this_chunk_items; ++i) {
+								void const *value_here = &((uint8_t const *)chunk)[i * item_size];
+								if (!data_equal(data_type, &value, value_here)) {
+									// eliminate this candidate
+									candidates[bitset_index/64] &= ~((uint64_t)1 << (bitset_index % 64));
+								}
+								++bitset_index;
+							}
+							
+							bytes_left -= this_chunk_bytes;
+						}
+						assert(bitset_index == bitset_index_end);
+						start = end;
+					}
+				}
+			}
+		} break;
+		case SEARCH_SAME_DIFFERENT:
+			// @TODO
+			display_error_nofmt(state, "not implemented");
+			break;
+		}
+		memory_reader_close(state, memory_reader);
+	}
+	
+	GtkLabel *steps_completed_label = GTK_LABEL(gtk_builder_get_object(builder, "steps-completed"));
+	long steps_completed = 1 + atol(gtk_label_get_text(steps_completed_label));
+	{
+		char text[32];
+		sprintf(text, "%ld", steps_completed);
+		gtk_label_set_text(steps_completed_label, text);
+	}
+	update_candidates(state);
+}
+
+G_MODULE_EXPORT void search_stop(GtkWidget *_widget, gpointer user_data) {
+	State *state = user_data;
+	GtkBuilder *builder = state->builder;
+	free(state->search_candidates);
+	gtk_widget_hide(GTK_WIDGET(gtk_builder_get_object(builder, "search-common")));
+	gtk_widget_hide(GTK_WIDGET(gtk_builder_get_object(builder, "search-enter-value")));
+	gtk_widget_hide(GTK_WIDGET(gtk_builder_get_object(builder, "search-same-different")));
+	gtk_widget_show(GTK_WIDGET(gtk_builder_get_object(builder, "pre-search")));
+	gtk_widget_show(GTK_WIDGET(gtk_builder_get_object(builder, "data-type-box")));
 }
 
 // this function is run once per frame
