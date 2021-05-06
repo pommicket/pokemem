@@ -13,44 +13,98 @@ static SearchType search_type_from_str(char const *str) {
 	return 0xff;
 }
 
-// pass config_potentially_changed = false if there definitely hasn't been an update to the target address
-// (this is used by auto-refresh so we don't have to clear and re-make the list store each time, which would screw up selection)
-static void update_memory_view(State *state, bool config_potentially_changed) {
+static void update_memory_view(State *state) {
 	if (!state->pid)
 		return;
 	GtkBuilder *builder = state->builder;
 	GtkListStore *store = GTK_LIST_STORE(gtk_builder_get_object(builder, "memory"));
-	uint32_t ndisplay = state->memory_view_entries;
-	if (config_potentially_changed)
+	uint32_t ndisplay = state->memory_view_items;
+	if (ndisplay == 0 || !state->nmaps) {
 		gtk_list_store_clear(store);
-	if (ndisplay == 0)
 		return;
+	}
 	DataType data_type = state->data_type;
 	size_t item_size = data_type_size(data_type);
 	void *mem = calloc(item_size, ndisplay);
+	GtkTreeIter iter;
+	bool updating = // are we updating rows in the list store? (rather than adding new ones)
+		gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(store), &iter, "0");
 	if (mem) {
-		int reader = memory_reader_open(state);
-		if (reader) {
-			GtkTreeIter iter;
-			ndisplay = (uint32_t)memory_read_bytes(reader, state->memory_view_address, mem, ndisplay * item_size);
-			gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(store), &iter, "0");
-			char *value = mem;
-			Address addr = state->memory_view_address;
-			for (Address i = 0; i < ndisplay; i += 1, addr += item_size, value += item_size) {
-				char index_str[32], addr_str[32], value_str[32];
-				sprintf(index_str, "%" PRIdADDR, i);
-				sprintf(addr_str, "%" PRIxADDR, addr);
-				data_to_str(value, data_type, value_str, sizeof value_str);
-				if (config_potentially_changed) {
-					gtk_list_store_insert_with_values(store, &iter, -1, 0, index_str, 1, addr_str, 2, value_str, -1);
-				} else {
-					if (i != (Address)state->editing_memory)
-						gtk_list_store_set(store, &iter, 0, index_str, 1, addr_str, 2, value_str, -1);
-					if (!gtk_tree_model_iter_next(GTK_TREE_MODEL(store), &iter))
-						config_potentially_changed = true; // could happen if a map grows
+		if (!state->search_candidates || state->memory_view_address) {
+			Address base_addr = state->memory_view_address ? state->memory_view_address : state->maps[0].lo;
+			int reader = memory_reader_open(state);
+			if (reader) {
+				ndisplay = ((uint32_t)memory_read_bytes(reader, base_addr, mem, ndisplay * item_size)) / item_size;
+				char *value = mem;
+				Address addr = base_addr;
+				for (uint32_t i = 0; i < ndisplay; i += 1, addr += item_size, value += item_size) {
+					char index_str[32], addr_str[32], value_str[32];
+					sprintf(index_str, "%" PRIu32, i);
+					sprintf(addr_str, "%" PRIxADDR, addr);
+					data_to_str(value, data_type, value_str, sizeof value_str);
+					if (i != (Address)state->editing_memory) {
+						if (updating)
+							gtk_list_store_set(store, &iter, 0, index_str, 1, addr_str, 2, value_str, -1);
+						else
+							gtk_list_store_insert_with_values(store, &iter, -1, 0, index_str, 1, addr_str, 2, value_str, -1);
+					}
+					if (updating)
+						updating = gtk_tree_model_iter_next(GTK_TREE_MODEL(store), &iter);
 				}
+				memory_reader_close(state, reader);
 			}
-			memory_reader_close(state, reader);
+		} else {
+			int reader = memory_reader_open(state);
+			if (reader) {
+				uint32_t candidate_idx = 0;
+				// show search candidates
+				uint64_t *candidates = state->search_candidates;
+				Address bitset_index = 0;
+				for (unsigned m = 0; m < state->nmaps; ++m) {
+					Map *map = &state->maps[m];
+					for (Address i = 0; i < map->size; ) {
+						if (i % 64 == 0 && candidates[bitset_index / 64] == 0) {
+							// this stretch of 64 has no candidates.
+							i += 64;
+							bitset_index += 64;
+						} else {
+							if (candidates[bitset_index / 64] & MASK64(bitset_index % 64)) {
+								// a candidate!
+								Address addr = map->lo + i * item_size;
+								uint64_t value;
+								char index_str[32], addr_str[32], value_str[32];
+								sprintf(index_str, "%u", candidate_idx);
+								sprintf(addr_str, "%" PRIxADDR, addr);
+								size_t nread = memory_read_bytes(reader, addr, (uint8_t *)&value, item_size);
+								if (nread == item_size) {
+									data_to_str(&value, data_type, value_str, sizeof value_str);
+								} else {
+									strcpy(value_str, "N/A");
+								}
+								if (i != (Address)state->editing_memory) {
+									if (updating) {
+										gtk_list_store_set(store, &iter, 0, index_str, 1, addr_str, 2, value_str, -1);
+									} else {
+										gtk_list_store_insert_with_values(store, &iter, -1, 0, index_str, 1, addr_str, 2, value_str, -1);
+									}
+								}
+								if (updating)
+									updating = gtk_tree_model_iter_next(GTK_TREE_MODEL(store), &iter);
+								++candidate_idx;
+								if (candidate_idx >= ndisplay) goto done;
+							}
+							++i;
+							++bitset_index;
+						}
+					}
+				}
+			done:
+				memory_reader_close(state, reader);
+			}
+		}
+		if (updating) {
+			// delete any extra rows
+			while (gtk_list_store_remove(store, &iter));
 		}
 		free(mem);
 	} else {
@@ -90,19 +144,20 @@ G_MODULE_EXPORT void update_configuration(GtkWidget *_widget, gpointer user_data
 	GtkBuilder *builder = state->builder;
 	state->stop_while_accessing_memory = gtk_toggle_button_get_active(
 		GTK_TOGGLE_BUTTON(gtk_builder_get_object(builder, "stop-while-accessing-memory")));
-	char const *n_entries_text = gtk_entry_get_text(
-		GTK_ENTRY(gtk_builder_get_object(builder, "memory-display-entries")));
+	char const *n_items_text = gtk_entry_get_text(
+		GTK_ENTRY(gtk_builder_get_object(builder, "memory-n-items")));
 	char *endp;
 	bool update_memview = false;
-	unsigned long n_entries = strtoul(n_entries_text, &endp, 10);
-	if (*n_entries_text && !*endp && n_entries != state->memory_view_entries) {
-		state->memory_view_entries = (uint32_t)n_entries;
+	unsigned long n_items = strtoul(n_items_text, &endp, 10);
+	if (*n_items_text && !*endp && n_items != state->memory_view_items) {
+		state->memory_view_items = (uint32_t)n_items;
 		update_memview = true;
 	}
 	char const *address_text = gtk_entry_get_text(
 		GTK_ENTRY(gtk_builder_get_object(builder, "address")));
 	unsigned long address = strtoul(address_text, &endp, 16);
-	if (*address_text && !*endp && address != state->memory_view_address) {
+	// if the box is empty, this will be interpreted as 0, which is what we want.
+	if (!*endp && address != state->memory_view_address) {
 		state->memory_view_address = address;
 		update_memview = true;
 	}
@@ -151,7 +206,7 @@ G_MODULE_EXPORT void update_configuration(GtkWidget *_widget, gpointer user_data
 	}
 	
 	if (update_memview) {
-		update_memory_view(state, true);
+		update_memory_view(state);
 	}
 }
 
@@ -227,13 +282,8 @@ G_MODULE_EXPORT void select_pid(GtkButton *_button, gpointer user_data) {
 			state->pid = (PID)pid_number;
 			close(dir);
 			if (update_maps(state)) {
-				update_configuration(NULL, state); // we need to do this to update the search resource usage estimates
-				if (state->nmaps) {
-					// display whatever's in the first mapping
-					Map *first_map = &state->maps[0];
-					state->memory_view_address = first_map->lo;
-					update_memory_view(state, true);
-				}
+				update_configuration(NULL, state); // we need to do this to update the search resource usage estimates, etc.
+				update_memory_view(state);
 				// only allow searching once a process has been selected
 				gtk_widget_show(GTK_WIDGET(gtk_builder_get_object(builder, "search-box")));
 			}
@@ -247,8 +297,14 @@ G_MODULE_EXPORT void memory_edited(GtkCellRendererText *_renderer, char *path, c
 	GtkBuilder *builder = state->builder;
 	DataType data_type = state->data_type;
 	size_t item_size = data_type_size(data_type);
-	Address idx = (Address)atol(path);
-	Address addr = state->memory_view_address + idx * item_size;
+	GtkListStore *store = GTK_LIST_STORE(gtk_builder_get_object(builder, "memory"));
+	GtkTreeIter iter;
+	gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(store), &iter, path);
+	gchararray addr_str;
+	// get address from store
+	gtk_tree_model_get(GTK_TREE_MODEL(store), &iter, 1, &addr_str, -1);
+	Address addr = strtoull(addr_str, NULL, 16);
+	g_free(addr_str);
 	state->editing_memory = -1;
 	uint64_t value = 0;
 	if (data_from_str(new_text, data_type, &value)) {
@@ -258,13 +314,11 @@ G_MODULE_EXPORT void memory_edited(GtkCellRendererText *_renderer, char *path, c
 			bool success = memory_write_bytes(writer, addr, (uint8_t const *)&value, item_size) == item_size;
 			memory_writer_close(state, writer);
 			if (success) {
-				GtkListStore *store = GTK_LIST_STORE(gtk_builder_get_object(builder, "memory"));
-				GtkTreeIter iter;
 				char value_str[32];
 				// convert back to a string (so new_text = "0.10" becomes value_str = "0.1", etc.)
 				data_to_str(&value, data_type, value_str, sizeof value_str);
-				gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(store), &iter, path);
 				gtk_list_store_set(store, &iter, 2, value_str, -1);
+				
 			}
 			
 		}
@@ -273,7 +327,8 @@ G_MODULE_EXPORT void memory_edited(GtkCellRendererText *_renderer, char *path, c
 
 G_MODULE_EXPORT void refresh_memory(GtkWidget *_widget, gpointer user_data) {
 	State *state = user_data;
-	update_memory_view(state, true);
+	update_configuration(NULL, state); // just in case they changed the number of items or something
+	update_memory_view(state);
 }
 
 G_MODULE_EXPORT void memory_editing_started(GtkCellRenderer *_renderer, GtkCellEditable *editable, char *path, gpointer user_data) {
@@ -311,9 +366,11 @@ G_MODULE_EXPORT void search_start(GtkWidget *_widget, gpointer user_data) {
 		DataType data_type = state->data_type;
 		size_t item_size = data_type_size(data_type);
 		gtk_widget_hide(GTK_WIDGET(gtk_builder_get_object(builder, "pre-search")));
-		gtk_widget_hide(GTK_WIDGET(gtk_builder_get_object(builder, "data-type-box")));
+		gtk_widget_set_sensitive(GTK_WIDGET(gtk_builder_get_object(builder, "data-type-box")), 0);
 		gtk_widget_show(GTK_WIDGET(gtk_builder_get_object(builder, "search-common")));
 		gtk_label_set_text(GTK_LABEL(gtk_builder_get_object(builder, "steps-completed")), "0");
+		gtk_entry_set_text(GTK_ENTRY(gtk_builder_get_object(builder, "address")), "");
+		state->memory_view_address = 0;
 		// state->total_memory should always be a multiple of the page size, which is definitely a multiple of 64 * 8 = 512.
 		assert(state->total_memory % 512 == 0);
 		uint64_t *candidates = state->search_candidates = malloc(state->total_memory / (8 * item_size));
@@ -374,6 +431,7 @@ G_MODULE_EXPORT void search_update(GtkWidget *_widget, gpointer user_data) {
 							bitset_index_end += 64;
 						}
 						
+						Address run_addr = addr_lo + start * item_size;
 						// we have a "run" of possible candidates from `start` to `end`.
 						Address run_size = end - start;
 						Address bytes_left = run_size * item_size;
@@ -384,18 +442,15 @@ G_MODULE_EXPORT void search_update(GtkWidget *_widget, gpointer user_data) {
 							if (this_chunk_bytes > bytes_left)
 								this_chunk_bytes = bytes_left;
 							
-							Address base_addr = addr_lo + run_size * item_size - bytes_left;
-							this_chunk_bytes = memory_read_bytes(memory_reader, base_addr, (uint8_t *)chunk, this_chunk_bytes);
-							if (this_chunk_bytes == 0) {
-								break; // uh oh....
-							}
-							
+							Address chunk_addr = run_addr + run_size * item_size - bytes_left;
+							memset(chunk, 0, sizeof chunk); // if we can't read the memory, treat it as 0
+							memory_read_bytes(memory_reader, chunk_addr, (uint8_t *)chunk, this_chunk_bytes);
 							size_t this_chunk_items = this_chunk_bytes / item_size;
 							for (size_t i = 0; i < this_chunk_items; ++i) {
 								void const *value_here = &((uint8_t const *)chunk)[i * item_size];
 								if (!data_equal(data_type, &value, value_here)) {
 									// eliminate this candidate
-									candidates[bitset_index/64] &= ~((uint64_t)1 << (bitset_index % 64));
+									candidates[bitset_index/64] &= ~MASK64(bitset_index % 64);
 								}
 								++bitset_index;
 							}
@@ -424,17 +479,19 @@ G_MODULE_EXPORT void search_update(GtkWidget *_widget, gpointer user_data) {
 		gtk_label_set_text(steps_completed_label, text);
 	}
 	update_candidates(state);
+	update_memory_view(state);
 }
 
 G_MODULE_EXPORT void search_stop(GtkWidget *_widget, gpointer user_data) {
 	State *state = user_data;
 	GtkBuilder *builder = state->builder;
 	free(state->search_candidates);
+	state->search_candidates = NULL;
 	gtk_widget_hide(GTK_WIDGET(gtk_builder_get_object(builder, "search-common")));
 	gtk_widget_hide(GTK_WIDGET(gtk_builder_get_object(builder, "search-enter-value")));
 	gtk_widget_hide(GTK_WIDGET(gtk_builder_get_object(builder, "search-same-different")));
 	gtk_widget_show(GTK_WIDGET(gtk_builder_get_object(builder, "pre-search")));
-	gtk_widget_show(GTK_WIDGET(gtk_builder_get_object(builder, "data-type-box")));
+	gtk_widget_set_sensitive(GTK_WIDGET(gtk_builder_get_object(builder, "data-type-box")), 1);
 }
 
 // this function is run once per frame
@@ -444,7 +501,7 @@ static gboolean frame_callback(gpointer user_data) {
 	GtkToggleButton *auto_refresh = GTK_TOGGLE_BUTTON(gtk_builder_get_object(builder, "auto-refresh"));
 	
 	if (gtk_toggle_button_get_active(auto_refresh)) {
-		update_memory_view(state, false);
+		update_memory_view(state);
 	}
 	return 1;
 }

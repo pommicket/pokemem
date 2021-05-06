@@ -76,7 +76,7 @@ static Address memory_read_bytes(int reader, Address addr, uint8_t *memory, Addr
 	Address idx = 0;
 	while (idx < nbytes) {
 		ssize_t n = read(reader, &memory[idx], (size_t)(nbytes - idx));
-		if (n <= 0) break;
+		if (n <= 0) { break; }
 		idx += (Address)n;
 	}
 	return idx;

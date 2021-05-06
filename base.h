@@ -18,6 +18,8 @@ typedef uint64_t Address;
 #define PRIdADDR PRId64
 #define PRIxADDR PRIx64
 
+#define MASK64(i) ((uint64_t)1 << (i))
+
 typedef enum {
 	TYPE_U8,
 	TYPE_S8,
@@ -53,7 +55,7 @@ typedef struct {
 	Address total_memory; // total amount of memory used by process, in bytes
 	Map *maps;
 	Address memory_view_address;
-	uint32_t memory_view_entries; // # of entries to show
+	uint32_t memory_view_items; // # of entries to show
 	unsigned nmaps;
 	DataType data_type;
 	SearchType search_type;
