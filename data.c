@@ -141,8 +141,8 @@ static bool data_from_str(char const *str, DataType type, void *value) {
 	case TYPE_S32: return sscanf(str, "%" SCNd32 "%n", ( int32_t *)value, &w) == 1 && w == len;
 	case TYPE_U64: return sscanf(str, "%" SCNu64 "%n", (uint64_t *)value, &w) == 1 && w == len;
 	case TYPE_S64: return sscanf(str, "%" SCNd64 "%n", ( int64_t *)value, &w) == 1 && w == len;
-	case TYPE_F32: return sscanf(str, "%f%n",  (float *)value,  &w) == 1 && w == len;
-	case TYPE_F64: return sscanf(str, "%lf%n", (double *)value, &w) == 1 && w == len;
+	case TYPE_F32: return sscanf(str, "%f"       "%n", (float    *)value, &w) == 1 && w == len;
+	case TYPE_F64: return sscanf(str, "%lf"      "%n", (double   *)value, &w) == 1 && w == len;
 	case TYPE_ASCII:
 		if (!char_from_str(str, &c)) return false;
 		if (c > 127) return false;

@@ -395,11 +395,16 @@ G_MODULE_EXPORT void search_start(GtkWidget *_widget, gpointer user_data) {
 G_MODULE_EXPORT void search_update(GtkWidget *_widget, gpointer user_data) {
 	State *state = user_data;
 	GtkBuilder *builder = state->builder;
+	GtkWidget *search_box = GTK_WIDGET(gtk_builder_get_object(builder, "search-box"));
+	gtk_widget_set_sensitive(search_box, 0); // temporarily disable search box so that you don't accidentally queue up a bunch of updates while it's loading.
+	
 	DataType data_type = state->data_type;
 	size_t item_size = data_type_size(data_type);
 	SearchType search_type = state->search_type;
 	uint64_t *candidates = state->search_candidates;
 	int memory_reader = memory_reader_open(state);
+	bool success = true;
+	
 	if (memory_reader) {
 		switch (search_type) {
 		case SEARCH_ENTER_VALUE: {
@@ -461,7 +466,7 @@ G_MODULE_EXPORT void search_update(GtkWidget *_widget, gpointer user_data) {
 						start = end;
 					}
 				}
-			}
+			} else success = false;
 		} break;
 		case SEARCH_SAME_DIFFERENT:
 			// @TODO
@@ -469,17 +474,21 @@ G_MODULE_EXPORT void search_update(GtkWidget *_widget, gpointer user_data) {
 			break;
 		}
 		memory_reader_close(state, memory_reader);
+	} else success = false;
+	
+	if (success) {
+		GtkLabel *steps_completed_label = GTK_LABEL(gtk_builder_get_object(builder, "steps-completed"));
+		long steps_completed = 1 + atol(gtk_label_get_text(steps_completed_label));
+		{
+			char text[32];
+			sprintf(text, "%ld", steps_completed);
+			gtk_label_set_text(steps_completed_label, text);
+		}
+		update_candidates(state);
+		update_memory_view(state);
 	}
 	
-	GtkLabel *steps_completed_label = GTK_LABEL(gtk_builder_get_object(builder, "steps-completed"));
-	long steps_completed = 1 + atol(gtk_label_get_text(steps_completed_label));
-	{
-		char text[32];
-		sprintf(text, "%ld", steps_completed);
-		gtk_label_set_text(steps_completed_label, text);
-	}
-	update_candidates(state);
-	update_memory_view(state);
+	gtk_widget_set_sensitive(search_box, 1);
 }
 
 G_MODULE_EXPORT void search_stop(GtkWidget *_widget, gpointer user_data) {
