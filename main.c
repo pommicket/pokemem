@@ -18,6 +18,7 @@ static void update_memory_view(State *state) {
 		return;
 	GtkBuilder *builder = state->builder;
 	GtkListStore *store = GTK_LIST_STORE(gtk_builder_get_object(builder, "memory"));
+	GtkTreeModel *tree_model = GTK_TREE_MODEL(store);
 	uint32_t ndisplay = state->memory_view_items;
 	if (ndisplay == 0 || !state->nmaps) {
 		gtk_list_store_clear(store);
@@ -28,13 +29,13 @@ static void update_memory_view(State *state) {
 	void *mem = calloc(item_size, ndisplay);
 	GtkTreeIter iter;
 	bool updating = // are we updating rows in the list store? (rather than adding new ones)
-		gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(store), &iter, "0");
+	gtk_tree_model_get_iter_from_string(tree_model, &iter, "0");
 	if (mem) {
 		if (!state->search_candidates || state->memory_view_address) {
 			Address base_addr = state->memory_view_address ? state->memory_view_address : state->maps[0].lo;
 			int reader = memory_reader_open(state);
 			if (reader) {
-				ndisplay = ((uint32_t)memory_read_bytes(reader, base_addr, mem, ndisplay * item_size)) / item_size;
+				memory_read_bytes(reader, base_addr, mem, ndisplay * item_size);
 				char *value = mem;
 				Address addr = base_addr;
 				for (uint32_t i = 0; i < ndisplay; i += 1, addr += item_size, value += item_size) {
@@ -49,7 +50,7 @@ static void update_memory_view(State *state) {
 							gtk_list_store_insert_with_values(store, &iter, -1, 0, index_str, 1, addr_str, 2, value_str, -1);
 					}
 					if (updating)
-						updating = gtk_tree_model_iter_next(GTK_TREE_MODEL(store), &iter);
+						updating = gtk_tree_model_iter_next(tree_model, &iter);
 				}
 				memory_reader_close(state, reader);
 			}
@@ -71,7 +72,7 @@ static void update_memory_view(State *state) {
 							if (candidates[bitset_index / 64] & MASK64(bitset_index % 64)) {
 								// a candidate!
 								Address addr = map->lo + i * item_size;
-								uint64_t value;
+								uint64_t value = 0;
 								char index_str[32], addr_str[32], value_str[32];
 								sprintf(index_str, "%u", candidate_idx);
 								sprintf(addr_str, "%" PRIxADDR, addr);
@@ -89,7 +90,7 @@ static void update_memory_view(State *state) {
 									}
 								}
 								if (updating)
-									updating = gtk_tree_model_iter_next(GTK_TREE_MODEL(store), &iter);
+									updating = gtk_tree_model_iter_next(tree_model, &iter);
 								++candidate_idx;
 								if (candidate_idx >= ndisplay) goto done;
 							}
@@ -508,7 +509,6 @@ static gboolean frame_callback(gpointer user_data) {
 	State *state = user_data;
 	GtkBuilder *builder = state->builder;
 	GtkToggleButton *auto_refresh = GTK_TOGGLE_BUTTON(gtk_builder_get_object(builder, "auto-refresh"));
-	
 	if (gtk_toggle_button_get_active(auto_refresh)) {
 		update_memory_view(state);
 	}
