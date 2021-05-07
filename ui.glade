@@ -50,7 +50,7 @@
                     <property name="visible">True</property>
                     <property name="can-focus">True</property>
                     <property name="tooltip-text" translatable="yes">Display this many entries in the memory view</property>
-                    <property name="max-length">6</property>
+                    <property name="max-length">3</property>
                     <property name="text" translatable="yes">100</property>
                     <property name="input-purpose">number</property>
                     <signal name="activate" handler="update_configuration" swapped="no"/>
@@ -159,6 +159,9 @@
                         <child>
                           <object class="GtkCellRendererText" id="col_address">
                             <property name="editable">True</property>
+                            <signal name="edited" handler="memory_edited" swapped="no"/>
+                            <signal name="editing-canceled" handler="memory_editing_canceled" swapped="no"/>
+                            <signal name="editing-started" handler="memory_editing_started" swapped="no"/>
                           </object>
                           <attributes>
                             <attribute name="text">1</attribute>
@@ -707,6 +710,7 @@
                       <object class="GtkEntry" id="current-value">
                         <property name="visible">True</property>
                         <property name="can-focus">True</property>
+                        <property name="tooltip-text" translatable="yes">The current value in memory. For floating-point numbers, you don't need to get all the decimals, as long as you're within 10% of the actual value, you'll be fine.</property>
                         <signal name="activate" handler="search_update" swapped="no"/>
                       </object>
                       <packing>

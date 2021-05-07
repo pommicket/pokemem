@@ -162,6 +162,28 @@ static bool data_from_str(char const *str, DataType type, void *value) {
 	return false;
 }
 
+// returns whether or not the values are equal, or in the case of floating-point numbers,
+// approximately equal
 static bool data_equal(DataType type, void const *a, void const *b) {
-	return memcmp(a, b, data_type_size(type)) == 0;
+	double af, bf;
+	switch (type) {
+	case TYPE_F32:
+		af = *(float *)a, bf = *(float *)b;
+		goto floats;
+	case TYPE_F64:
+		af = *(double *)a, bf = *(double *)b;
+		goto floats;
+	floats: {
+		if (isinf(af) || isinf(bf) || isnan(af) || isnan(bf))
+			return false;
+		// special handling for small numbers
+		if (fabs(af) < 0.1 && fabs(bf) < 0.1)
+			return true;
+		double ab = af / bf;
+		double threshold = 1.1; // allow a 10% difference.
+		return ab >= (1/threshold) && ab <= threshold;
+	} break;
+	default:
+		return memcmp(a, b, data_type_size(type)) == 0;
+	}
 }

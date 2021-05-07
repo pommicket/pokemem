@@ -11,6 +11,7 @@
 #include <assert.h>
 #include <ctype.h>
 #include <wctype.h>
+#include <math.h>
 
 typedef pid_t PID;
 typedef uint64_t Address;
@@ -55,7 +56,7 @@ typedef struct {
 	Address total_memory; // total amount of memory used by process, in bytes
 	Map *maps;
 	Address memory_view_address;
-	uint32_t memory_view_items; // # of entries to show
+	unsigned memory_view_n_items; // # of entries to show
 	unsigned nmaps;
 	DataType data_type;
 	SearchType search_type;
