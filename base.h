@@ -60,6 +60,7 @@ typedef struct {
 	unsigned nmaps;
 	DataType data_type;
 	SearchType search_type;
+	GtkWidget *prev_focus;
 	uint64_t *search_candidates; // this is a bit array, where the ith bit corresponds to whether byte #i in the processes memory is a search candidate.
 } State;
 

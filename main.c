@@ -1,5 +1,4 @@
 // @TODO:
-// - set all candidates to value
 // - same/different search
 // - configure which memory to look at (see "rw-p")
 #include "base.h"
@@ -207,6 +206,36 @@ G_MODULE_EXPORT void update_configuration(GtkWidget *_widget, gpointer user_data
 	}
 }
 
+G_MODULE_EXPORT void set_all(GtkWidget *_widget, gpointer user_data) {
+	State *state = user_data;
+	GtkBuilder *builder = state->builder;
+	GtkEntry *value_entry = GTK_ENTRY(gtk_builder_get_object(builder, "set-all-value"));
+	uint64_t value = 0;
+	DataType data_type = state->data_type;
+	size_t item_size = data_type_size(data_type);
+	// parse the value
+	if (data_from_str(gtk_entry_get_text(value_entry), data_type, &value)) {
+		GtkListStore *store = GTK_LIST_STORE(gtk_builder_get_object(builder, "memory"));
+		GtkTreeModel *tree_model = GTK_TREE_MODEL(store);
+		GtkTreeIter iter;
+		if (gtk_tree_model_get_iter_first(tree_model, &iter)) {
+			int writer = memory_writer_open(state);
+			if (writer) {
+				do { // for each row in the memory view,
+					// extract address
+					gchararray addr_str;
+					gtk_tree_model_get(GTK_TREE_MODEL(store), &iter, 1, &addr_str, -1);
+					Address addr = (Address)strtoull(addr_str, NULL, 16);
+					g_free(addr_str);
+					// set memory to value
+					memory_write_bytes(writer, addr, (uint8_t const *)&value, item_size);
+				} while (gtk_tree_model_iter_next(tree_model, &iter));
+				memory_writer_close(state, writer);
+			}
+		}
+	}
+}
+
 // update the memory maps for the current process (state->maps)
 // returns true on success
 static bool update_maps(State *state) {
@@ -345,6 +374,48 @@ G_MODULE_EXPORT void memory_editing_canceled(GtkCellRenderer *_renderer, gpointe
 	state->editing_memory = -1;
 }
 
+G_MODULE_EXPORT void memory_view_key_press(GtkWidget *widget, GdkEvent *event, gpointer user_data) {
+	State *state = user_data;
+	GtkBuilder *builder = state->builder;
+	GdkEventKey *key_event = (GdkEventKey *)event;
+	if (key_event->keyval == GDK_KEY_Delete) {
+		uint64_t *search_candidates = state->search_candidates;
+		if (search_candidates && !state->memory_view_address) {
+			// allow deleting candidates with the delete key
+			GtkTreeView *tree_view = GTK_TREE_VIEW(widget);
+			GtkTreeModel *tree_model = GTK_TREE_MODEL(gtk_builder_get_object(builder, "memory"));
+			GtkListStore *list_store = GTK_LIST_STORE(tree_model);
+			GtkTreeSelection *selection = gtk_tree_view_get_selection(tree_view);
+			GList *selected_rows = gtk_tree_selection_get_selected_rows(selection, NULL);
+			for (GList *list = selected_rows; list; list = list->next) {
+				GtkTreePath *path = list->data;
+				GtkTreeIter iter;
+				if (gtk_tree_model_get_iter(tree_model, &iter, path)) {
+					gchararray addr_str;
+					gtk_tree_model_get(tree_model, &iter, 1, &addr_str, -1);
+					Address addr = (Address)strtoull(addr_str, NULL, 16);
+					g_free(addr_str);
+					gtk_list_store_remove(list_store, &iter);
+					Address bitset_idx = 0;
+					for (unsigned m = 0; m < state->nmaps; ++m) {
+						Map *map = &state->maps[m];
+						if (addr >= map->lo && addr < map->lo + map->size) {
+							bitset_idx += addr - map->lo;
+							// remove this candidate
+							search_candidates[bitset_idx / 64] &= ~MASK64(bitset_idx % 64);
+							break;
+						} else {
+							bitset_idx += map->size;
+						}
+					}
+				}
+			}
+			g_list_free_full(selected_rows, (GDestroyNotify)gtk_tree_path_free);
+		}
+	}
+}
+
+
 static void update_candidates(State *state) {
 	GtkBuilder *builder = state->builder;
 	uint64_t *candidates = state->search_candidates;
@@ -399,8 +470,12 @@ G_MODULE_EXPORT void search_start(GtkWidget *_widget, gpointer user_data) {
 G_MODULE_EXPORT void search_update(GtkWidget *_widget, gpointer user_data) {
 	State *state = user_data;
 	GtkBuilder *builder = state->builder;
+	GtkWindow *window = state->window;
 	GtkWidget *search_box = GTK_WIDGET(gtk_builder_get_object(builder, "search-box"));
-	gtk_widget_set_sensitive(search_box, 0); // temporarily disable search box so that you don't accidentally queue up a bunch of updates while it's loading.
+	
+	// disabling search-box can mess up the focus, it turns out
+	state->prev_focus = gtk_window_get_focus(window);
+	gtk_widget_set_sensitive(search_box, 0); // temporarily disable everything search-related so that you don't accidentally queue up a bunch of updates while it's loading. it will be reset on the next frame_callback.
 	
 	DataType data_type = state->data_type;
 	size_t item_size = data_type_size(data_type);
@@ -492,7 +567,6 @@ G_MODULE_EXPORT void search_update(GtkWidget *_widget, gpointer user_data) {
 		update_memory_view(state, true);
 	}
 	
-	gtk_widget_set_sensitive(search_box, 1);
 }
 
 G_MODULE_EXPORT void search_stop(GtkWidget *_widget, gpointer user_data) {
@@ -510,7 +584,23 @@ G_MODULE_EXPORT void search_stop(GtkWidget *_widget, gpointer user_data) {
 // this function is run once per frame
 static gboolean frame_callback(gpointer user_data) {
 	State *state = user_data;
+	GtkWindow *window = state->window;
 	GtkBuilder *builder = state->builder;
+	
+	GtkWidget *search_box = GTK_WIDGET(gtk_builder_get_object(builder, "search-box"));
+	
+	// sometimes we disable search-box. see search_update.
+	if (!gtk_widget_get_sensitive(search_box)) {
+		static int frame_counter;
+		if (frame_counter) {
+			gtk_widget_set_sensitive(search_box, 1);
+			gtk_window_set_focus(window, state->prev_focus);
+			frame_counter = 0;
+		} else {
+			++frame_counter;
+		}
+	}
+	
 	GtkToggleButton *auto_refresh = GTK_TOGGLE_BUTTON(gtk_builder_get_object(builder, "auto-refresh"));
 	if (gtk_toggle_button_get_active(auto_refresh)) {
 		update_memory_view(state, false);
