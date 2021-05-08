@@ -533,8 +533,8 @@ G_MODULE_EXPORT void search_update(GtkWidget *_widget, gpointer user_data) {
 	bool success = true;
 	
 	if (memory_reader) {
-		uint64_t value;
-		bool same;
+		uint64_t value = 0;
+		bool same = false, not_sure = false;
 		switch (search_type) {
 		case SEARCH_ENTER_VALUE: {
 			GtkEntry *value_entry = GTK_ENTRY(gtk_builder_get_object(builder, "current-value"));
@@ -543,6 +543,8 @@ G_MODULE_EXPORT void search_update(GtkWidget *_widget, gpointer user_data) {
 		case SEARCH_SAME_DIFFERENT: {
 			GtkToggleButton *same_button = GTK_TOGGLE_BUTTON(gtk_builder_get_object(builder, "same"));
 			same = gtk_toggle_button_get_active(same_button);
+			GtkToggleButton *not_sure_button = GTK_TOGGLE_BUTTON(gtk_builder_get_object(builder, "not-sure"));
+			not_sure = gtk_toggle_button_get_active(not_sure_button);
 		} break;
 		}
 		if (success) {
@@ -619,14 +621,16 @@ G_MODULE_EXPORT void search_update(GtkWidget *_widget, gpointer user_data) {
 									candidates[bitset_index/64] &= ~MASK64(bitset_index % 64);
 								}
 								break;
-							case SEARCH_SAME_DIFFERENT: {
-								void const *prev_value_here = &((uint8_t const *)savchunk)[i * item_size];
-								bool this_same = data_equal(data_type, value_here, prev_value_here);
-								if (this_same != same) {
-									// eliminate this candidate
-									candidates[bitset_index/64] &= ~MASK64(bitset_index % 64);
+							case SEARCH_SAME_DIFFERENT:
+								if (!not_sure) {
+									void const *prev_value_here = &((uint8_t const *)savchunk)[i * item_size];
+									bool this_same = data_equal(data_type, value_here, prev_value_here);
+									if (this_same != same) {
+										// eliminate this candidate
+										candidates[bitset_index/64] &= ~MASK64(bitset_index % 64);
+									}
 								}
-							} break;
+								break;
 							}
 							++bitset_index;
 						}
