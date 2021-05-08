@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Encoding=UTF-8
+Name=pokemem
+Comment=A utility for finding and editing values in a process' memory.
+Exec=pokemem
+Terminal=false
+Categories=Utility;Debugger;

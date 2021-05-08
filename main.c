@@ -728,10 +728,14 @@ G_MODULE_EXPORT void memfile_do_write_candidates(GtkWidget *_widget, gpointer us
 }
 
 static void on_activate(GtkApplication *app, gpointer user_data) {
+	char const *glade_file = "ui.glade";
+	if (access(glade_file, F_OK) != 0) {
+		glade_file = "/usr/share/pokemem/ui.glade";
+	}
 	State *state = user_data;
 	GError *error = NULL;
 	GtkBuilder *builder = gtk_builder_new();
-	if (!gtk_builder_add_from_file(builder, "ui.glade", &error)) {
+	if (!gtk_builder_add_from_file(builder, glade_file, &error)) {
 		g_printerr("Error loading UI: %s\n", error->message);
 		g_clear_error(&error);
 		exit(EXIT_FAILURE);

@@ -1,0 +1,11 @@
+Package: pokemem
+Version: 1.0
+Section: utils
+Priority: optional
+Architecture: amd64
+Essential: no
+Maintainer: Pommicket <pommicket@gmail.com>
+Description: A utility for finding and editing values in a process' memory.
+Installed-Size: 152
+Depends: libgtk-3-0
+Homepage: https://github.com/pommicket/pokemem
