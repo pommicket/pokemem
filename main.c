@@ -1,5 +1,4 @@
 // @TODO:
-// - same/different search
 // - configure which memory to look at (see "rw-p")
 #include "base.h"
 #include "unicode.h"
@@ -374,6 +373,24 @@ G_MODULE_EXPORT void memory_editing_canceled(GtkCellRenderer *_renderer, gpointe
 	state->editing_memory = -1;
 }
 
+static void update_candidates(State *state) {
+	GtkBuilder *builder = state->builder;
+	uint64_t *candidates = state->search_candidates;
+	size_t item_size = data_type_size(state->data_type);
+	Address entries = state->total_memory / (64 * item_size);
+	Address ncandidates = 0;
+	for (Address i = 0; i < entries; ++i) {
+		ncandidates += (unsigned)__builtin_popcountll(candidates[i]);
+	}
+	{
+		GtkLabel *ncandidates_label = GTK_LABEL(gtk_builder_get_object(builder, "candidates-left"));
+		char text[32];
+		sprintf(text, "%llu", (unsigned long long)ncandidates);
+		gtk_label_set_text(ncandidates_label, text);
+	}
+}
+
+
 G_MODULE_EXPORT void memory_view_key_press(GtkWidget *widget, GdkEvent *event, gpointer user_data) {
 	State *state = user_data;
 	GtkBuilder *builder = state->builder;
@@ -397,41 +414,29 @@ G_MODULE_EXPORT void memory_view_key_press(GtkWidget *widget, GdkEvent *event, g
 					g_free(addr_str);
 					gtk_list_store_remove(list_store, &iter);
 					Address bitset_idx = 0;
+					size_t item_size = data_type_size(state->data_type);
+					bool removed = false;
 					for (unsigned m = 0; m < state->nmaps; ++m) {
 						Map *map = &state->maps[m];
 						if (addr >= map->lo && addr < map->lo + map->size) {
-							bitset_idx += addr - map->lo;
+							bitset_idx += (addr - map->lo) / item_size;
 							// remove this candidate
 							search_candidates[bitset_idx / 64] &= ~MASK64(bitset_idx % 64);
+							removed = true;
 							break;
 						} else {
-							bitset_idx += map->size;
+							bitset_idx += map->size / item_size;
 						}
 					}
+					(void)removed; assert(removed);
 				}
 			}
 			g_list_free_full(selected_rows, (GDestroyNotify)gtk_tree_path_free);
+			update_candidates(state);
 		}
 	}
 }
 
-
-static void update_candidates(State *state) {
-	GtkBuilder *builder = state->builder;
-	uint64_t *candidates = state->search_candidates;
-	size_t item_size = data_type_size(state->data_type);
-	Address entries = state->total_memory / (64 * item_size);
-	Address ncandidates = 0;
-	for (Address i = 0; i < entries; ++i) {
-		ncandidates += (unsigned)__builtin_popcountll(candidates[i]);
-	}
-	{
-		GtkLabel *ncandidates_label = GTK_LABEL(gtk_builder_get_object(builder, "candidates-left"));
-		char text[32];
-		sprintf(text, "%llu", (unsigned long long)ncandidates);
-		gtk_label_set_text(ncandidates_label, text);
-	}
-}
 
 G_MODULE_EXPORT void search_start(GtkWidget *_widget, gpointer user_data) {
 	State *state = user_data;
@@ -454,9 +459,32 @@ G_MODULE_EXPORT void search_start(GtkWidget *_widget, gpointer user_data) {
 			case SEARCH_ENTER_VALUE:
 				gtk_widget_show(GTK_WIDGET(gtk_builder_get_object(builder, "search-enter-value")));
 				break;
-			case SEARCH_SAME_DIFFERENT:
+			case SEARCH_SAME_DIFFERENT: {
 				gtk_widget_show(GTK_WIDGET(gtk_builder_get_object(builder, "search-same-different")));
-				break;
+				FILE *prev_mem = tmpfile();
+				if (prev_mem) {
+					state->prev_memory = prev_mem;
+					// write memory to file
+					int reader = memory_reader_open(state);
+					if (reader) {
+						for (unsigned m = 0; m < state->nmaps; ++m) {
+							Map *map = &state->maps[m];
+							Address map_size = map->size;
+							uint8_t block[4096] = {0};
+							Address bytes_left = map_size;
+							while (bytes_left > 0) {
+								Address bytes_read = memory_read_bytes(reader, map->lo + (map_size - bytes_left), block, sizeof block);
+								if (bytes_read < sizeof block) break;
+								fwrite(block, 1, (size_t)bytes_read, prev_mem);
+								bytes_left -= bytes_read;
+							}
+						}
+						memory_reader_close(state, reader);
+					}
+				} else {
+					display_error_nofmt(state, "Couldn't create temporary file.");
+				}
+			} break;
 			}
 			update_configuration(NULL, state);
 			update_candidates(state);
@@ -485,73 +513,115 @@ G_MODULE_EXPORT void search_update(GtkWidget *_widget, gpointer user_data) {
 	bool success = true;
 	
 	if (memory_reader) {
+		uint64_t value;
+		bool same;
 		switch (search_type) {
 		case SEARCH_ENTER_VALUE: {
-			uint64_t value;
 			GtkEntry *value_entry = GTK_ENTRY(gtk_builder_get_object(builder, "current-value"));
-			if (data_from_str(gtk_entry_get_text(value_entry), data_type, &value)) {
-				Address bitset_index = 0;
-				for (unsigned m = 0; m < state->nmaps; ++m) {
-					// there is some kinda complicated code here to skip over large regions of
-					// eliminated addresses. specifically, we can skip 64 bytes at a time, because
-					// of our bitset.
-					Map const *map = &state->maps[m];
-					Address addr_lo = map->lo;
-					Address n_items = map->size / item_size;
-					Address start = 0;
+			success = data_from_str(gtk_entry_get_text(value_entry), data_type, &value);
+		} break;
+		case SEARCH_SAME_DIFFERENT: {
+			GtkToggleButton *same_button = GTK_TOGGLE_BUTTON(gtk_builder_get_object(builder, "same"));
+			same = gtk_toggle_button_get_active(same_button);
+		} break;
+		}
+		if (success) {
+			Address bitset_index = 0;
+			FILE *prev_mem = state->prev_memory;
+			if (prev_mem) rewind(prev_mem);
+			for (unsigned m = 0; m < state->nmaps; ++m) {
+				// there is some kinda complicated code here to skip over large regions of
+				// eliminated addresses. specifically, we can skip 64 bytes at a time, because
+				// of our bitset.
+				Map const *map = &state->maps[m];
+				Address addr_lo = map->lo;
+				Address n_items = map->size / item_size;
+				Address start = 0;
+				
+				fpos_t map_base_pos;
+				if (prev_mem)
+					fgetpos(prev_mem, &map_base_pos);
+				while (start < n_items) {
 					while (start < n_items) {
-						while (start < n_items) {
-							if (candidates[bitset_index/64])
-								break;
-							start += 64;
-							bitset_index += 64;
-						}
-						Address end = start, bitset_index_end = bitset_index;
+						if (candidates[bitset_index/64])
+							break;
+						start += 64;
+						bitset_index += 64;
+					}
+					Address end = start, bitset_index_end = bitset_index;
+					
+					while (end < n_items) {
+						if (candidates[bitset_index_end/64] == 0)
+							break;
+						end += 64;
+						bitset_index_end += 64;
+					}
+					
+					Address run_offset = start * item_size;
+					// we have a "run" of possible candidates from `start` to `end`.
+					Address run_size = end - start;
+					Address bytes_left = run_size * item_size;
+					// this "run" could be pretty long, so let's do it in chunks.
+					uint64_t memchunk[512]; // current memory (uint64_t to be as aligned as possible)
+					uint64_t savchunk[512]; // previous memory (SEARCH_SAME_DIFFERENT only)
+					if (search_type == SEARCH_SAME_DIFFERENT)
+						rewind(prev_mem);
+					while (bytes_left > 0) {
+						size_t this_chunk_bytes = sizeof memchunk;
+						if (this_chunk_bytes > bytes_left)
+							this_chunk_bytes = bytes_left;
 						
-						while (end < n_items) {
-							if (candidates[bitset_index_end/64] == 0)
-								break;
-							end += 64;
-							bitset_index_end += 64;
+						// chunk offset within map
+						Address chunk_offset = run_offset + run_size * item_size - bytes_left;
+						Address chunk_addr = addr_lo + chunk_offset;
+						memset(memchunk, 0, sizeof memchunk); // if we can't read the memory, treat it as 0
+						memory_read_bytes(memory_reader, chunk_addr, (uint8_t *)memchunk, this_chunk_bytes);
+						
+						if (search_type == SEARCH_SAME_DIFFERENT) {
+							memset(savchunk, 0, sizeof savchunk);
+							fsetpos(prev_mem, &map_base_pos);
+							fseek(prev_mem, (long)chunk_offset, SEEK_CUR);
+							// read the previous memory,
+							fread(savchunk, 1, this_chunk_bytes, prev_mem);
+							fsetpos(prev_mem, &map_base_pos);
+							fseek(prev_mem, (long)chunk_offset, SEEK_CUR);
+							// then overwrite it with the current memory
+							fwrite(memchunk, 1, this_chunk_bytes, prev_mem);
 						}
 						
-						Address run_addr = addr_lo + start * item_size;
-						// we have a "run" of possible candidates from `start` to `end`.
-						Address run_size = end - start;
-						Address bytes_left = run_size * item_size;
-						// this "run" could be pretty long, so let's do it in chunks.
-						uint64_t chunk[512]; // (make sure this is as aligned as possible)
-						while (bytes_left > 0) {
-							size_t this_chunk_bytes = sizeof chunk;
-							if (this_chunk_bytes > bytes_left)
-								this_chunk_bytes = bytes_left;
-							
-							Address chunk_addr = run_addr + run_size * item_size - bytes_left;
-							memset(chunk, 0, sizeof chunk); // if we can't read the memory, treat it as 0
-							memory_read_bytes(memory_reader, chunk_addr, (uint8_t *)chunk, this_chunk_bytes);
-							size_t this_chunk_items = this_chunk_bytes / item_size;
-							for (size_t i = 0; i < this_chunk_items; ++i) {
-								void const *value_here = &((uint8_t const *)chunk)[i * item_size];
+						size_t this_chunk_items = this_chunk_bytes / item_size;
+						for (size_t i = 0; i < this_chunk_items; ++i) {
+							void const *value_here = &((uint8_t const *)memchunk)[i * item_size];
+							switch (search_type) {
+							case SEARCH_ENTER_VALUE:
 								if (!data_equal(data_type, &value, value_here)) {
 									// eliminate this candidate
 									candidates[bitset_index/64] &= ~MASK64(bitset_index % 64);
 								}
-								++bitset_index;
+								break;
+							case SEARCH_SAME_DIFFERENT: {
+								void const *prev_value_here = &((uint8_t const *)savchunk)[i * item_size];
+								bool this_same = data_equal(data_type, value_here, prev_value_here);
+								if (this_same != same) {
+									// eliminate this candidate
+									candidates[bitset_index/64] &= ~MASK64(bitset_index % 64);
+								}
+							} break;
 							}
-							
-							bytes_left -= this_chunk_bytes;
+							++bitset_index;
 						}
-						assert(bitset_index == bitset_index_end);
-						start = end;
+						
+						bytes_left -= this_chunk_bytes;
 					}
+					assert(bitset_index == bitset_index_end);
+					start = end;
 				}
-			} else success = false;
-		} break;
-		case SEARCH_SAME_DIFFERENT:
-			// @TODO
-			display_error_nofmt(state, "not implemented");
-			break;
-		}
+				if (prev_mem) {
+					fsetpos(prev_mem, &map_base_pos);
+					fseek(prev_mem, (long)map->size, SEEK_CUR);
+				}
+			}
+		} else success = false;
 		memory_reader_close(state, memory_reader);
 	} else success = false;
 	
@@ -574,6 +644,10 @@ G_MODULE_EXPORT void search_stop(GtkWidget *_widget, gpointer user_data) {
 	GtkBuilder *builder = state->builder;
 	free(state->search_candidates);
 	state->search_candidates = NULL;
+	if (state->prev_memory) {
+		fclose(state->prev_memory);
+		state->prev_memory = NULL;
+	}
 	gtk_widget_hide(GTK_WIDGET(gtk_builder_get_object(builder, "search-common")));
 	gtk_widget_hide(GTK_WIDGET(gtk_builder_get_object(builder, "search-enter-value")));
 	gtk_widget_hide(GTK_WIDGET(gtk_builder_get_object(builder, "search-same-different")));

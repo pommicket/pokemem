@@ -62,6 +62,7 @@ typedef struct {
 	SearchType search_type;
 	GtkWidget *prev_focus;
 	uint64_t *search_candidates; // this is a bit array, where the ith bit corresponds to whether byte #i in the processes memory is a search candidate.
+	FILE *prev_memory; // used by same/different search to hold the memory at the previous step
 } State;
 
 static void display_dialog_box_nofmt(State *state, GtkMessageType type, char const *message) {
