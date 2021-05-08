@@ -1,5 +1,3 @@
-// @TODO:
-// - configure which memory to look at (see "rw-p")
 #include "base.h"
 #include "unicode.h"
 #include "data.c"
@@ -133,9 +131,68 @@ static char const *radio_group_get_selected(State *state, char const *group_name
 	return NULL;
 }
 
+// update the memory maps for the current process (state->maps)
+// returns true on success
+static bool update_maps(State *state) {
+	GtkBuilder *builder = state->builder;
+	char const *desired_protection = gtk_entry_get_text(GTK_ENTRY(gtk_builder_get_object(builder, "protection")));
+	free(state->maps); state->maps = NULL;
+	
+	char maps_name[64];
+	sprintf(maps_name, "/proc/%lld/maps", (long long)state->pid);
+	FILE *maps_file = fopen(maps_name, "rb");
+	if (maps_file) {
+		char line[256];
+		size_t capacity = 0;
+		while (fgets(line, sizeof line, maps_file))
+			++capacity;
+		rewind(maps_file);
+		Map *maps = state->maps = calloc(capacity, sizeof *maps);
+		unsigned nmaps = 0;
+		state->total_memory = 0;
+		if (maps) {
+			while (fgets(line, sizeof line, maps_file)) {
+				Address addr_lo, addr_hi;
+				char protections[8];
+				if (sscanf(line, "%" SCNxADDR "-%" SCNxADDR " %8s", &addr_lo, &addr_hi, protections) == 3 && nmaps < capacity) {
+					if (strcmp(protections, desired_protection) == 0) {
+						Map *map = &maps[nmaps++];
+						map->lo = addr_lo;
+						map->size = addr_hi - addr_lo;
+						state->total_memory += map->size;
+					}
+				}
+			}
+			state->nmaps = nmaps;
+			return true;
+		} else {
+			display_error(state, "Not enough memory to hold map metadata (%zu items)", capacity);
+		}
+	} else {
+		display_error(state, "Couldn't open %s: %s", maps_name, strerror(errno));
+	}
+	return false;
+}
+
 G_MODULE_EXPORT void update_configuration(GtkWidget *_widget, gpointer user_data) {
 	State *state = user_data;
 	GtkBuilder *builder = state->builder;
+	
+	static char prev_protection[5] = "rw-p";
+	char const *protection = gtk_entry_get_text(GTK_ENTRY(gtk_builder_get_object(builder, "protection")));
+	if (strcmp(protection, prev_protection) != 0) {
+		strcpy(prev_protection, protection);
+		if (update_maps(state)) {
+			if (state->nmaps) {
+				GtkEntry *address_entry = GTK_ENTRY(gtk_builder_get_object(builder, "address"));
+				Address addr = state->maps[0].lo;
+				char addr_text[32];
+				sprintf(addr_text, "%" PRIxADDR, addr);
+				gtk_entry_set_text(address_entry, addr_text);
+			}
+		}
+	}
+	
 	state->stop_while_accessing_memory = gtk_toggle_button_get_active(
 		GTK_TOGGLE_BUTTON(gtk_builder_get_object(builder, "stop-while-accessing-memory")));
 	char const *n_items_text = gtk_entry_get_text(
@@ -203,6 +260,7 @@ G_MODULE_EXPORT void update_configuration(GtkWidget *_widget, gpointer user_data
 		
 		update_memory_view(state, true);
 	}
+	
 }
 
 G_MODULE_EXPORT void set_all(GtkWidget *_widget, gpointer user_data) {
@@ -235,46 +293,6 @@ G_MODULE_EXPORT void set_all(GtkWidget *_widget, gpointer user_data) {
 	}
 }
 
-// update the memory maps for the current process (state->maps)
-// returns true on success
-static bool update_maps(State *state) {
-	free(state->maps); state->maps = NULL;
-	
-	char maps_name[64];
-	sprintf(maps_name, "/proc/%lld/maps", (long long)state->pid);
-	FILE *maps_file = fopen(maps_name, "rb");
-	if (maps_file) {
-		char line[256];
-		size_t capacity = 0;
-		while (fgets(line, sizeof line, maps_file))
-			++capacity;
-		rewind(maps_file);
-		Map *maps = state->maps = calloc(capacity, sizeof *maps);
-		unsigned nmaps = 0;
-		state->total_memory = 0;
-		if (maps) {
-			while (fgets(line, sizeof line, maps_file)) {
-				Address addr_lo, addr_hi;
-				char protections[8];
-				if (sscanf(line, "%" SCNxADDR "-%" SCNxADDR " %8s", &addr_lo, &addr_hi, protections) == 3 && nmaps < capacity) {
-					if (strcmp(protections, "rw-p") == 0) { // @TODO(eventually): make this configurable
-						Map *map = &maps[nmaps++];
-						map->lo = addr_lo;
-						map->size = addr_hi - addr_lo;
-						state->total_memory += map->size;
-					}
-				}
-			}
-			state->nmaps = nmaps;
-			return true;
-		} else {
-			display_error(state, "Not enough memory to hold map metadata (%zu items)", capacity);
-		}
-	} else {
-		display_error(state, "Couldn't open %s: %s", maps_name, strerror(errno));
-	}
-	return false;
-}
 
 // the user entered a PID.
 G_MODULE_EXPORT void select_pid(GtkButton *_button, gpointer user_data) {
@@ -451,7 +469,9 @@ G_MODULE_EXPORT void search_start(GtkWidget *_widget, gpointer user_data) {
 		if (candidates) {
 			gtk_widget_hide(GTK_WIDGET(gtk_builder_get_object(builder, "pre-search")));
 			gtk_widget_set_sensitive(GTK_WIDGET(gtk_builder_get_object(builder, "data-type-box")), 0);
+			gtk_widget_set_sensitive(GTK_WIDGET(gtk_builder_get_object(builder, "protection")), 0);
 			gtk_widget_show(GTK_WIDGET(gtk_builder_get_object(builder, "search-common")));
+			gtk_widget_show(GTK_WIDGET(gtk_builder_get_object(builder, "save-search-candidates")));
 			gtk_label_set_text(GTK_LABEL(gtk_builder_get_object(builder, "steps-completed")), "0");
 			gtk_entry_set_text(GTK_ENTRY(gtk_builder_get_object(builder, "address")), "");
 			memset(candidates, 0xff, state->total_memory / (8 * item_size));
@@ -651,8 +671,10 @@ G_MODULE_EXPORT void search_stop(GtkWidget *_widget, gpointer user_data) {
 	gtk_widget_hide(GTK_WIDGET(gtk_builder_get_object(builder, "search-common")));
 	gtk_widget_hide(GTK_WIDGET(gtk_builder_get_object(builder, "search-enter-value")));
 	gtk_widget_hide(GTK_WIDGET(gtk_builder_get_object(builder, "search-same-different")));
+	gtk_widget_hide(GTK_WIDGET(gtk_builder_get_object(builder, "save-search-candidates")));
 	gtk_widget_show(GTK_WIDGET(gtk_builder_get_object(builder, "pre-search")));
 	gtk_widget_set_sensitive(GTK_WIDGET(gtk_builder_get_object(builder, "data-type-box")), 1);
+	gtk_widget_set_sensitive(GTK_WIDGET(gtk_builder_get_object(builder, "protection")), 1);
 }
 
 // this function is run once per frame
@@ -680,6 +702,25 @@ static gboolean frame_callback(gpointer user_data) {
 		update_memory_view(state, false);
 	}
 	return 1;
+}
+
+
+G_MODULE_EXPORT void memfile_do_read(GtkWidget *_widget, gpointer user_data) {
+	State *state = user_data;
+	GtkBuilder *builder = state->builder;
+	memfile_load(state, gtk_entry_get_text(GTK_ENTRY(gtk_builder_get_object(builder, "memfile-path"))));
+}
+
+G_MODULE_EXPORT void memfile_do_write_all(GtkWidget *_widget, gpointer user_data) {
+	State *state = user_data;
+	GtkBuilder *builder = state->builder;
+	memfile_write_all(state, gtk_entry_get_text(GTK_ENTRY(gtk_builder_get_object(builder, "memfile-path"))));
+}
+
+G_MODULE_EXPORT void memfile_do_write_candidates(GtkWidget *_widget, gpointer user_data) {
+	State *state = user_data;
+	GtkBuilder *builder = state->builder;
+	memfile_write_candidates(state, gtk_entry_get_text(GTK_ENTRY(gtk_builder_get_object(builder, "memfile-path"))));
 }
 
 static void on_activate(GtkApplication *app, gpointer user_data) {
